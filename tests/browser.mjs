@@ -178,9 +178,9 @@ try {
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).filter(p => p.includes('diagnostic-')).length >= 2);
   const finalReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
-  assert.equal(finalReport.probeVersion, '0.0.4');
+  assert.equal(finalReport.probeVersion, '0.0.5');
   assert.equal(finalReport.strokesSaved, 21);
-  await page.screenshot({ path: '.test/probe-0.0.4.png' });
+  await page.screenshot({ path: '.test/probe-0.0.5.png' });
   // Independent two-page PDF, loaded through the vault API rather than the embedded fixture.
   const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 5 0 R >>',
@@ -209,6 +209,48 @@ try {
   await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
   const savedA = await viewState();
   assert.equal(savedA.strokes.length, 1);
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 2 / 2 页'));
+  assert.equal((await viewState()).strokes.length, 0);
+  assert.ok((await viewState()).run.endsWith('-p2'));
+  const p2 = await page.locator('.inkpdf-probe-ink').boundingBox();
+  await page.mouse.move(p2.x + 160, p2.y + 100); await page.mouse.down();
+  await page.mouse.move(p2.x + 210, p2.y + 150); await page.mouse.up();
+  // Navigate immediately: page switch must flush, not discard the debounce window.
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 1 / 2 页'));
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 2 / 2 页'));
+  const savedSecond = await viewState();
+  assert.equal(savedSecond.strokes.length, 1);
+  assert.notDeepEqual(savedSecond.strokes, savedA.strokes);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 2 / 2 页'));
+  assert.deepEqual((await viewState()).strokes, savedSecond.strokes);
+  await page.evaluate(() => { window.failWrites = true; });
+  const p2b = await page.locator('.inkpdf-probe-ink').boundingBox();
+  await page.mouse.move(p2b.x + 230, p2b.y + 140); await page.mouse.down();
+  await page.mouse.move(p2b.x + 260, p2b.y + 180); await page.mouse.up();
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('失败'));
+  assert.equal((await viewState()).pdf.selectedPage, 2);
+  assert.equal((await viewState()).strokes.length, 2);
+  await page.evaluate(() => { window.failWrites = false; });
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 1 / 2 页'));
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 2 / 2 页'));
+  assert.equal((await viewState()).strokes.length, 2);
+  await page.evaluate(() => window.plugin.commands['toggle-pen-eraser']());
+  await page.getByRole('button', { name: '工具：整笔橡皮', exact: true }).waitFor();
+  await page.evaluate(() => window.plugin.commands['toggle-pen-eraser']());
+  await page.getByRole('button', { name: '工具：钢笔', exact: true }).waitFor();
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 1 / 2 页'));
+  checks.push('Per-page ink isolated, immediate navigation flushes, restart resumes page 2, failed save blocks navigation without losing ink, retry works');
+  checks.push('Explicit pen/eraser command toggles tool; no simulated Pencil barrel double tap');
   await page.reload();
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('1 笔'));
   assert.deepEqual((await viewState()).strokes, savedA.strokes);
@@ -254,10 +296,10 @@ try {
   assert.equal(pdfReport.pdf.selectedPage, 1);
   assert.equal(pdfReport.pdf.sourceReadOnly, true);
   assert.equal(JSON.stringify(pdfReport).includes('Renamed.pdf'), false);
-  await page.screenshot({ path: '.test/vault-pdf-0.0.4.png' });
+  await page.screenshot({ path: '.test/vault-pdf-0.0.5.png' });
   checks.push('Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1');
   assert.equal(failures.length, 0, failures.join('\n'));
-  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.4', status: 'PASS', browser: await browser.version(), checks,
+  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.5', status: 'PASS', browser: await browser.version(), checks,
     notRun: ['real Obsidian', 'iPad WKWebView', 'Apple Pencil', 'OCR', 'GitHub sync'] }, null, 2));
   console.log(checks.join('\n'));
 } finally {

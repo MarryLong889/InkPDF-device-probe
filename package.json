@@ -1,6 +1,6 @@
 {
   "name": "inkpdf-device-probe",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "private": true,
   "description": "InkPDF T1 device probe; not a full annotation plugin",
   "scripts": {

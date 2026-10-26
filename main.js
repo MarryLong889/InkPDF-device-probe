@@ -208,9 +208,10 @@ var ROOT = "InkPDF-Probe";
 var InkPDFProbe = class extends import_obsidian.Plugin {
   lastRun = null;
   lastPdfPath = null;
+  lastPage = 1;
   opening = false;
   async remember() {
-    await this.saveData({ lastRun: this.lastRun, lastPdfPath: this.lastPdfPath });
+    await this.saveData({ lastRun: this.lastRun, lastPdfPath: this.lastPdfPath, lastPage: this.lastPage });
   }
   choosePdf() {
     const plugin = this;
@@ -231,6 +232,7 @@ var InkPDFProbe = class extends import_obsidian.Plugin {
       const data = await this.loadData();
       if (validId(data?.lastRun)) this.lastRun = data.lastRun;
       if (typeof data?.lastPdfPath === "string" && data.lastPdfPath.toLowerCase().endsWith(".pdf")) this.lastPdfPath = data.lastPdfPath;
+      if (Number.isSafeInteger(data?.lastPage) && data.lastPage > 0) this.lastPage = data.lastPage;
     } catch {
       new import_obsidian.Notice("InkPDF\uFF1A\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF0C\u53EF\u65B0\u5EFA\u6D4B\u8BD5\uFF1B\u672A\u5220\u9664\u65E7\u6D4B\u8BD5\u6587\u4EF6");
     }
@@ -241,12 +243,16 @@ var InkPDFProbe = class extends import_obsidian.Plugin {
     this.addCommand({ id: "new-run", name: "\u65B0\u5EFA\u72EC\u7ACB\u8BBE\u5907\u6D4B\u8BD5", callback: () => {
       void this.open(true).catch((e) => new import_obsidian.Notice(String(e)));
     } });
-    this.addCommand({ id: "open-pdf", name: "\u6253\u5F00\u4ED3\u5E93 PDF\uFF08\u7B2C 1 \u9875\uFF09", callback: () => this.choosePdf() });
+    this.addCommand({ id: "open-pdf", name: "\u6253\u5F00\u4ED3\u5E93 PDF", callback: () => this.choosePdf() });
+    this.addCommand({ id: "toggle-pen-eraser", name: "\u5207\u6362\u94A2\u7B14 / \u6A61\u76AE\u64E6", callback: () => {
+      const view = this.app.workspace.getLeavesOfType(VIEW)[0]?.view;
+      if (view instanceof ProbeView) view.toggleTool();
+    } });
     this.addRibbonIcon("pen-tool", "InkPDF \u8BBE\u5907\u63A2\u9488", () => {
       void this.open(false).catch((e) => new import_obsidian.Notice(String(e)));
     });
   }
-  async open(fresh, pdfPath) {
+  async open(fresh, pdfPath, page = 1) {
     if (this.opening) return;
     this.opening = true;
     try {
@@ -256,12 +262,13 @@ var InkPDFProbe = class extends import_obsidian.Plugin {
         return;
       }
       for (const leaf2 of old) {
-        if (leaf2.view instanceof ProbeView) await leaf2.view.flush();
+        if (leaf2.view instanceof ProbeView) await leaf2.view.prepareNavigation();
         leaf2.detach();
       }
       if (fresh || !this.lastRun) {
         this.lastRun = uniqueId();
         if (fresh) this.lastPdfPath = pdfPath ?? null;
+        if (fresh) this.lastPage = Number.isSafeInteger(page) && page > 0 ? page : 1;
         await this.remember();
       }
       const leaf = this.app.workspace.getLeaf("tab");
@@ -277,6 +284,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     super(leaf);
     this.plugin = plugin;
     this.pdfPath = plugin.lastPdfPath;
+    this.pageNumber = this.pdfPath ? plugin.lastPage : 1;
   }
   plugin;
   runId = "";
@@ -290,6 +298,12 @@ var ProbeView = class extends import_obsidian.ItemView {
   eraseHistory = new EraseHistory();
   eraseUndoButton;
   tool = "pen";
+  toolButton;
+  pageNumber;
+  navigating = false;
+  prevButton;
+  nextButton;
+  pageLabel;
   pressureGain = 2.5;
   touches = /* @__PURE__ */ new Set();
   pan;
@@ -342,6 +356,21 @@ var ProbeView = class extends import_obsidian.ItemView {
   };
   report = {};
   pdfPath;
+  async prepareNavigation() {
+    this.navigating = true;
+    try {
+      await this.flush();
+    } catch (e) {
+      this.navigating = false;
+      throw e;
+    }
+  }
+  toggleTool() {
+    if (!this.ready || this.navigating) return;
+    this.finish("tool-change");
+    this.tool = this.tool === "pen" ? "eraser" : "pen";
+    this.toolButton.textContent = this.tool === "pen" ? "\u5DE5\u5177\uFF1A\u94A2\u7B14" : "\u5DE5\u5177\uFF1A\u6574\u7B14\u6A61\u76AE";
+  }
   getViewType() {
     return VIEW;
   }
@@ -383,11 +412,15 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("inkpdf-probe");
     this.contentEl.createEl("h2", { text: "InkPDF \xB7 \u6700\u5C0F\u8BBE\u5907\u63A2\u9488" });
-    this.contentEl.createEl("p", { text: "\u4EC5\u6D4B\u8BD5\u5355\u9875 PDF\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u6574\u7B14\u6A61\u76AE\u652F\u6301\u8FDE\u7EED\u6062\u590D\uFF0C\u6700\u591A\u4FDD\u7559 20 \u6B65\uFF08\u672C\u6B21\u6253\u5F00\u671F\u95F4\uFF09\u3002" });
+    this.contentEl.createEl("p", { text: "\u9010\u9875 PDF \u4E66\u5199\u6D4B\u8BD5\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u6574\u7B14\u6A61\u76AE\u652F\u6301\u8FDE\u7EED\u6062\u590D\uFF0C\u6700\u591A\u4FDD\u7559 20 \u6B65\uFF08\u5F53\u524D\u9875\u6253\u5F00\u671F\u95F4\uFF09\u3002\u7B14\u4F53\u53CC\u51FB\u6682\u4E0D\u53EF\u7528\uFF0C\u8BF7\u7528\u5DE5\u5177\u6309\u94AE\u5207\u6362\u3002" });
     const controls = this.contentEl.createDiv({ cls: "inkpdf-probe-controls" });
     this.button(controls, "\u6253\u5F00\u4ED3\u5E93 PDF", () => this.plugin.choosePdf());
     const sourceLabel = this.contentEl.createDiv({ cls: "inkpdf-probe-source" });
-    sourceLabel.textContent = this.pdfPath ? `${this.pdfPath} \xB7 \u4EC5\u7B2C 1 \u9875 \xB7 \u539F\u6587\u4EF6\u53EA\u8BFB\uFF1B\u76F8\u540C\u5185\u5BB9\u526F\u672C\u5171\u4EAB\u7B14\u8FF9` : "\u5408\u6210 PDF \u8BBE\u5907\u6D4B\u8BD5";
+    sourceLabel.textContent = this.pdfPath ? `${this.pdfPath} \xB7 \u539F\u6587\u4EF6\u53EA\u8BFB\uFF1B\u76F8\u540C\u5185\u5BB9\u526F\u672C\u5171\u4EAB\u9010\u9875\u7B14\u8FF9` : "\u5408\u6210 PDF \u8BBE\u5907\u6D4B\u8BD5";
+    this.prevButton = this.button(controls, "\u4E0A\u4E00\u9875", () => this.ready && this.pdfPath && this.pageNumber > 1 ? this.plugin.open(true, this.pdfPath, this.pageNumber - 1) : void 0);
+    this.pageLabel = controls.createEl("span", { text: "\u52A0\u8F7D\u9875\u7801\u4E2D\u2026", attr: { role: "status" } });
+    this.nextButton = this.button(controls, "\u4E0B\u4E00\u9875", () => this.ready && this.pdfPath && this.pdf && this.pageNumber < this.pdf.numPages ? this.plugin.open(true, this.pdfPath, this.pageNumber + 1) : void 0);
+    this.prevButton.disabled = this.nextButton.disabled = true;
     const modeButton = this.button(controls, "\u6A21\u5F0F\uFF1A\u4E66\u5199", () => {
       this.finish("mode-change");
       this.pan = void 0;
@@ -396,11 +429,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       this.ink.style.touchAction = this.mode === "write" ? "none" : "pan-x pan-y";
       this.scroll.style.touchAction = this.ink.style.touchAction;
     });
-    const toolButton = this.button(controls, "\u5DE5\u5177\uFF1A\u94A2\u7B14", () => {
-      this.finish("tool-change");
-      this.tool = this.tool === "pen" ? "eraser" : "pen";
-      toolButton.textContent = this.tool === "pen" ? "\u5DE5\u5177\uFF1A\u94A2\u7B14" : "\u5DE5\u5177\uFF1A\u6574\u7B14\u6A61\u76AE";
-    });
+    this.toolButton = this.button(controls, "\u5DE5\u5177\uFF1A\u94A2\u7B14", () => this.toggleTool());
     this.eraseUndoButton = this.button(controls, "\u6062\u590D\u64E6\u9664\uFF08\u5269\u4F59 0 \u6B65\uFF09", () => {
       this.finish("restore");
       this.strokes = this.eraseHistory.restore(this.strokes);
@@ -515,7 +544,8 @@ var ProbeView = class extends import_obsidian.ItemView {
       cryptoSubtle: !!globalThis.crypto?.subtle,
       crossOriginIsolated: globalThis.crossOriginIsolated,
       limits: LIMITS,
-      scope: this.pdfPath ? "Vault PDF page 1; read-only source; no OCR" : "One synthetic PDF; no OCR",
+      scope: this.pdfPath ? "Vault PDF per-page ink; read-only source; no OCR" : "One synthetic PDF; no OCR",
+      pencilDoubleTap: "UNAVAILABLE_NO_PUBLIC_HOST_API",
       manualResults: { pencil: "NOT RUN", pressureVariation: "NOT RUN", palmRejection: "NOT RUN", appRestart: "NOT RUN", backgroundKill: "NOT RUN" }
     };
     void this.probeWorker();
@@ -540,14 +570,24 @@ var ProbeView = class extends import_obsidian.ItemView {
       this.plugin.lastRun = uniqueId();
       await this.plugin.remember();
     }
-    this.runId = this.pdfPath ? `pdf-${sourceHash}-p1` : this.plugin.lastRun;
+    const started = performance.now();
+    const lib = await (0, import_obsidian.loadPdfJs)();
+    if (this.closed) return;
+    if (typeof lib?.getDocument !== "function") throw new Error("loadPdfJs \u672A\u63D0\u4F9B getDocument");
+    this.report.pdfjsVersion = lib.version ?? "unknown";
+    const task = lib.getDocument({ data: bytes.slice(), isEvalSupported: false, enableXfa: false, disableAutoFetch: true, disableStream: true });
+    this.pdfTask = task;
+    this.pdf = await task.promise;
+    if (this.closed) return;
+    if (!this.pdfPath && this.pdf.numPages !== 1) throw new Error("\u6D4B\u8BD5\u5939\u5177\u5E94\u5F53\u53EA\u6709\u4E00\u9875");
+    this.pageNumber = Math.min(this.pageNumber, this.pdf.numPages);
+    this.runId = this.pdfPath ? `pdf-${sourceHash}-p${this.pageNumber}` : this.plugin.lastRun;
     const dir = `${ROOT}/${this.runId}`;
     for (const p of [ROOT, dir, `${dir}/snapshots`]) await this.folder(p);
-    let diskBytes = bytes;
     if (!this.pdfPath) {
       const pdfPath = `${dir}/probe.pdf`;
       if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
-      diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
+      const diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
       if (await sha256(diskBytes) !== sourceHash) throw new Error("\u6D4B\u8BD5 PDF \u5DF2\u6539\u53D8\uFF0C\u62D2\u7EDD\u8986\u76D6\u6216\u53E0\u52A0");
     }
     this.store = new ProbeStore({
@@ -565,20 +605,15 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
     this.report.loadedFromDisk = { strokeCount: this.savedCount, revision: this.store.revision };
     this.report.sourceHash = sourceHash;
-    const started = performance.now();
-    const lib = await (0, import_obsidian.loadPdfJs)();
-    if (this.closed) return;
-    if (typeof lib?.getDocument !== "function") throw new Error("loadPdfJs \u672A\u63D0\u4F9B getDocument");
-    this.report.pdfjsVersion = lib.version ?? "unknown";
-    const task = lib.getDocument({ data: diskBytes, isEvalSupported: false, enableXfa: false, disableAutoFetch: true, disableStream: true });
-    this.pdfTask = task;
-    this.pdf = await task.promise;
-    if (this.closed) return;
-    if (!this.pdfPath && this.pdf.numPages !== 1) throw new Error("\u6D4B\u8BD5\u5939\u5177\u5E94\u5F53\u53EA\u6709\u4E00\u9875");
-    this.page = await this.pdf.getPage(1);
+    this.page = await this.pdf.getPage(this.pageNumber);
     await this.render();
     if (this.closed) return;
-    this.report.pdf = { status: "PASS", elapsedMs: Math.round(performance.now() - started), pages: this.pdf.numPages, selectedPage: 1, sourceReadOnly: true };
+    this.report.pdf = { status: "PASS", elapsedMs: Math.round(performance.now() - started), pages: this.pdf.numPages, selectedPage: this.pageNumber, sourceReadOnly: true };
+    this.pageLabel.textContent = `\u7B2C ${this.pageNumber} / ${this.pdf.numPages} \u9875`;
+    this.prevButton.disabled = !this.pdfPath || this.pageNumber === 1;
+    this.nextButton.disabled = !this.pdfPath || this.pageNumber === this.pdf.numPages;
+    this.plugin.lastPage = this.pageNumber;
+    await this.plugin.remember();
     this.ready = true;
     this.state();
   }
@@ -705,7 +740,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       }
       return;
     }
-    if (!this.ready || !this.viewport || this.mode !== "write" || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
+    if (!this.ready || this.navigating || !this.viewport || this.mode !== "write" || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
     if (this.active || this.erasing) this.finish("superseded-down");
     if (this.tool === "pen" && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
       new import_obsidian.Notice("\u5DF2\u8FBE\u63A2\u9488\u4E0A\u9650\uFF0C\u8BF7\u5BFC\u51FA\u8BCA\u65AD\u540E\u65B0\u5EFA\u72EC\u7ACB\u6D4B\u8BD5");

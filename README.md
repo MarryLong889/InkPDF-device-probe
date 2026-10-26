@@ -1,8 +1,8 @@
 # InkPDF 最小设备探针
 
-当前本地版本 0.0.4，新增仓库真实 PDF 第 1 页的只读打开、独立笔迹关联和保存重开。仍不是完整 PDF 批注或 OCR 插件。
+当前本地版本 0.0.5，新增真实 PDF 上一页/下一页、逐页独立笔迹和重启续页。原 PDF 只读，尚未实机验收。Apple Pencil 笔体双击没有可验证的公共宿主接口，暂不支持；提供工具切换命令作为替代。
 
-本阶段 iPad 测试步骤：[docs/REAL_PDF_0.0.4.md](docs/REAL_PDF_0.0.4.md)。0.0.3 实机基线：[docs/IPAD_ACCEPTANCE_0.0.3.md](docs/IPAD_ACCEPTANCE_0.0.3.md)。
+本阶段 iPad 测试步骤：[docs/MULTIPAGE_0.0.5.md](docs/MULTIPAGE_0.0.5.md)。0.0.4 实机基线：[docs/IPAD_ACCEPTANCE_0.0.4.md](docs/IPAD_ACCEPTANCE_0.0.4.md)。
 
 ## 构建与检查
 
