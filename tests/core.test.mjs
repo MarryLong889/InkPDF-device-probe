@@ -1,7 +1,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ProbeStore, parseSnapshot, pdfPoint, penWidth, hitsStroke } from '../.test/core.mjs';
+import { ProbeStore, parseSnapshot, pdfPoint, penWidth, hitsStroke, EraseHistory } from '../.test/core.mjs';
 const hash = 'a'.repeat(64);
+test('multiple erase restores preserve order and newly drawn strokes', () => {
+  const h = new EraseHistory(), a = stroke(1), b = stroke(2), c = stroke(3), d = stroke(4);
+  h.record([a, b, c], [a, c]);
+  h.record([a, c], [c]);
+  assert.deepEqual(h.restore([c, d]), [a, c, d]);
+  assert.deepEqual(h.restore([a, c, d]), [a, b, c, d]);
+  assert.equal(h.depth, 0);
+});
+test('erase history is bounded and no-op erasing does not consume a step', () => {
+  const h = new EraseHistory();
+  h.record([stroke(1)], [stroke(1)]);
+  assert.equal(h.depth, 0);
+  for (let i = 0; i < 25; i++) h.record([stroke(i)], []);
+  assert.equal(h.depth, 20);
+});
+test('restore limit failure retains history and current strokes', () => {
+  const h = new EraseHistory(), current = Array.from({ length: 200 }, (_, i) => stroke(i));
+  h.record([stroke(201)], []);
+  assert.throws(() => h.restore(current), /上限/);
+  assert.equal(h.depth, 1);
+  assert.equal(current.length, 200);
+});
 const stroke = n => ({ id: `stroke-${n}`, pointerType: 'pen', interrupted: false, points: [[10, 20, .4, 0], [11, 21, .8, 12]] });
 function memory() {
   const map = new Map();

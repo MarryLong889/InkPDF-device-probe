@@ -116,7 +116,7 @@ try {
     const canvas = document.querySelector('.inkpdf-probe-ink'), r = canvas.getBoundingClientRect();
     const scroll = document.querySelector('.inkpdf-probe-scroll');
     const before = scroll.scrollTop;
-    const p = { pointerId: 102, pointerType: 'touch', button: 0, buttons: 1, bubbles: true, clientX: r.left + 180, clientY: r.top + 300 };
+    const p = { pointerId: 102, pointerType: 'touch', width: 64, height: 64, button: 0, buttons: 1, bubbles: true, clientX: r.left + 180, clientY: r.top + 300 };
     canvas.dispatchEvent(new PointerEvent('pointerdown', p));
     document.dispatchEvent(new PointerEvent('pointermove', { ...p, clientY: p.clientY - 100 }));
     document.dispatchEvent(new PointerEvent('pointerup', { ...p, clientY: p.clientY - 100 }));
@@ -125,6 +125,25 @@ try {
   assert.ok(panResult.after > panResult.before);
   assert.equal((await latest()).strokes.length, 22);
   checks.push('One-finger pan works in writing mode after pen-up without creating strokes');
+  await page.evaluate(() => {
+    const view = window.mockApp.workspace.getLeavesOfType()[0].view;
+    view.lastPenAt = performance.now(); // Reproduce a finger landing inside the pen-up guard window.
+    const canvas = document.querySelector('.inkpdf-probe-ink'), r = canvas.getBoundingClientRect();
+    const scroll = document.querySelector('.inkpdf-probe-scroll'); scroll.scrollTop = 0;
+    const p = { pointerId: 103, pointerType: 'touch', width: 64, height: 64, bubbles: true, clientX: r.left + 200, clientY: 600 };
+    window.testTouch = p;
+    canvas.dispatchEvent(new PointerEvent('pointerdown', p));
+    document.dispatchEvent(new PointerEvent('pointermove', { ...p, clientY: 580 }));
+    if (scroll.scrollTop !== 0) throw new Error('cooldown must suppress early movement');
+  });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const p = window.testTouch;
+    document.dispatchEvent(new PointerEvent('pointermove', { ...p, clientY: 480 }));
+    document.dispatchEvent(new PointerEvent('pointerup', { ...p, clientY: 480 }));
+    if (document.querySelector('.inkpdf-probe-scroll').scrollTop <= 0) throw new Error('same finger must resume after cooldown');
+  });
+  checks.push('Finger landing during cooldown can pan later without lifting; 64px contact is accepted');
   await page.evaluate(() => { document.querySelector('.inkpdf-probe-scroll').scrollTop = 0; });
   await page.getByRole('button', { name: '工具：钢笔', exact: true }).click();
   const eraserTarget = await page.evaluate(() => {
@@ -137,9 +156,19 @@ try {
   await page.mouse.click(eraserTarget.x, eraserTarget.y);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('21 笔') && document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   assert.equal((await latest()).strokes.length, 21);
-  await page.getByRole('button', { name: '恢复上次擦除', exact: true }).click();
+  await page.getByRole('button', { name: /恢复擦除/ }).click();
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('22 笔') && document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   assert.equal((await latest()).strokes.length, 22);
+  // Two distinct erases must be recoverable in reverse order.
+  await page.mouse.click(eraserTarget.x, eraserTarget.y);
+  await page.mouse.click(eraserTarget.x, eraserTarget.y + 45);
+  await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
+  assert.equal((await latest()).strokes.length, 20);
+  await page.getByRole('button', { name: /恢复擦除/ }).click();
+  await page.getByRole('button', { name: /恢复擦除/ }).click();
+  await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
+  assert.equal((await latest()).strokes.length, 22);
+  checks.push('Two erase transactions restore in order and persist');
   await page.mouse.click(eraserTarget.x, eraserTarget.y);
   await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
   await page.reload();
@@ -149,15 +178,14 @@ try {
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).filter(p => p.includes('diagnostic-')).length >= 2);
   const finalReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
-  assert.equal(finalReport.probeVersion, '0.0.2');
+  assert.equal(finalReport.probeVersion, '0.0.3');
   assert.equal(finalReport.strokesSaved, 21);
-  await page.screenshot({ path: '.test/probe-0.0.2.png' });
+  await page.screenshot({ path: '.test/probe-0.0.3.png' });
   assert.equal(failures.length, 0, failures.join('\n'));
-  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.2', status: 'PASS', browser: await browser.version(), checks,
+  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.3', status: 'PASS', browser: await browser.version(), checks,
     notRun: ['real Obsidian', 'iPad WKWebView', 'Apple Pencil', 'OCR', 'GitHub sync'] }, null, 2));
   console.log(checks.join('\n'));
 } finally {
   await browser?.close();
   server.close();
 }
-

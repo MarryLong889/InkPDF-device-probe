@@ -85,6 +85,30 @@ export interface ProbeFiles {
   create(path: string, text: string): Promise<void>;
 }
 
+// shortcut: erase history is session-only; persistent general undo belongs to a later stage.
+export class EraseHistory {
+  private entries: { stroke: Stroke; index: number }[][] = [];
+  get depth(): number { return this.entries.length; }
+  record(before: Stroke[], after: Stroke[]): void {
+    const remaining = new Set(after.map(s => s.id));
+    const removed = before.flatMap((stroke, index) => remaining.has(stroke.id) ? [] : [{ stroke, index }]);
+    if (!removed.length) return;
+    this.entries.push(removed);
+    while (this.entries.length > 20 || this.entries.reduce((n, entry) => n + entry.reduce((m, item) => m + item.stroke.points.length, 0), 0) > LIMITS.totalPoints) this.entries.shift();
+  }
+  restore(current: Stroke[]): Stroke[] {
+    const entry = this.entries.at(-1);
+    if (!entry) return current;
+    const restored = current.slice();
+    for (const { stroke, index } of entry) {
+      if (!restored.some(s => s.id === stroke.id)) restored.splice(index, 0, stroke);
+    }
+    if (restored.length > LIMITS.strokes || restored.reduce((n, s) => n + s.points.length, 0) > LIMITS.totalPoints) throw new Error('恢复会超过探针上限；历史保留，请先擦除其他笔迹');
+    this.entries.pop();
+    return restored;
+  }
+}
+
 // shortcut: cumulative immutable snapshots cost space; replace after T3 fault-tested journal exists.
 export class ProbeStore {
   revision = 0;

@@ -1,5 +1,5 @@
 import { ItemView, Notice, Plugin, WorkspaceLeaf, loadPdfJs, apiVersion } from 'obsidian';
-import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, penWidth, hitsStroke } from './core';
+import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, penWidth, hitsStroke, EraseHistory } from './core';
 import { workerProbe } from './capabilities';
 import { PDF_BASE64 } from './generated/fixture';
 
@@ -48,13 +48,14 @@ class ProbeView extends ItemView {
   private savedEditVersion = 0;
   private active?: { pointerId: number; started: number; stroke: Stroke };
   private erasing?: { pointerId: number; before: Stroke[]; last: [number, number]; changed: boolean };
-  private erasedBefore?: Stroke[];
+  private eraseHistory = new EraseHistory();
   private eraseUndoButton!: HTMLButtonElement;
   private tool: 'pen' | 'eraser' = 'pen';
   private pressureGain = 2.5;
   private touches = new Set<number>();
   private pan?: { id: number; x: number; y: number; moving: boolean };
   private lastPenAt = -Infinity;
+  private touchDiagnostics = { moves: 0, blockedPen: 0, blockedMulti: 0, cooldownMoves: 0, maxContact: 0, scrollChanges: 0 };
   private totalPoints = 0;
   private frame = 0;
   private paintedPoints = 0;
@@ -122,7 +123,7 @@ class ProbeView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass('inkpdf-probe');
     this.contentEl.createEl('h2', { text: 'InkPDF · 最小设备探针' });
-    this.contentEl.createEl('p', { text: '仅测试单页 PDF。请先关闭 iPad 随手写 / Scribble。笔抬起后可单指滚动；笔落下时暂停手指导航。整笔橡皮可恢复最近一次擦除。' });
+    this.contentEl.createEl('p', { text: '仅测试单页 PDF。请先关闭 iPad 随手写 / Scribble。笔抬起后可单指滚动；笔落下时暂停手指导航。整笔橡皮支持连续恢复，最多保留 20 步（本次打开期间）。' });
     const controls = this.contentEl.createDiv({ cls: 'inkpdf-probe-controls' });
     const modeButton = this.button(controls, '模式：书写', () => {
       this.finish('mode-change');
@@ -137,12 +138,10 @@ class ProbeView extends ItemView {
       this.tool = this.tool === 'pen' ? 'eraser' : 'pen';
       toolButton.textContent = this.tool === 'pen' ? '工具：钢笔' : '工具：整笔橡皮';
     });
-    this.eraseUndoButton = this.button(controls, '恢复上次擦除', () => {
+    this.eraseUndoButton = this.button(controls, '恢复擦除（剩余 0 步）', () => {
       this.finish('restore');
-      if (!this.erasedBefore) return;
-      this.strokes = this.erasedBefore;
-      this.erasedBefore = undefined;
-      this.eraseUndoButton.disabled = true;
+      this.strokes = this.eraseHistory.restore(this.strokes);
+      this.updateEraseHistory();
       this.changed(); this.redraw();
     });
     this.eraseUndoButton.disabled = true;
@@ -356,7 +355,10 @@ class ProbeView extends ItemView {
       this.touches.add(e.pointerId);
       if (this.mode === 'browse') return;
       e.preventDefault();
-      if (this.touches.size !== 1 || this.active || this.erasing || performance.now() - this.lastPenAt < 180 || Math.max(e.width, e.height) > 40) {
+      this.touchDiagnostics.maxContact = Math.max(this.touchDiagnostics.maxContact, e.width, e.height);
+      if (this.touches.size !== 1 || this.active || this.erasing) {
+        if (this.active || this.erasing) this.touchDiagnostics.blockedPen++;
+        else this.touchDiagnostics.blockedMulti++;
         this.pan = undefined; this.pointerStats.ignoredTouches++; return;
       }
       this.pan = { id: e.pointerId, x: e.clientX, y: e.clientY, moving: false };
@@ -378,7 +380,6 @@ class ProbeView extends ItemView {
       this.erasing = { pointerId: e.pointerId, before: this.strokes.slice(), last: this.eventPoint(e), changed: false };
       this.eraseAt(e); this.state(); return;
     }
-    this.erasedBefore = undefined; this.eraseUndoButton.disabled = true;
     this.paintedPoints = 0;
     this.lastSampleTime = e.timeStamp;
     this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain } };
@@ -430,13 +431,20 @@ class ProbeView extends ItemView {
   }
   private move(e: PointerEvent): void {
     if (e.pointerType === 'touch') {
+      this.touchDiagnostics.moves++;
       if (this.mode === 'browse' || e.pointerId !== this.pan?.id || this.active || this.erasing) return;
       e.preventDefault();
       const p = this.pan;
+      if (performance.now() - this.lastPenAt < 180) {
+        p.x = e.clientX; p.y = e.clientY;
+        this.touchDiagnostics.cooldownMoves++; return;
+      }
       if (!p.moving && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 8) return;
       p.moving = true;
+      const oldX = this.scroll.scrollLeft, oldY = this.scroll.scrollTop;
       this.scroll.scrollLeft += p.x - e.clientX;
       this.scroll.scrollTop += p.y - e.clientY;
+      if (this.scroll.scrollLeft !== oldX || this.scroll.scrollTop !== oldY) this.touchDiagnostics.scrollChanges++;
       p.x = e.clientX; p.y = e.clientY;
       this.pointerStats.touchPanMoves++; return;
     }
@@ -455,7 +463,7 @@ class ProbeView extends ItemView {
       this.lastPenAt = performance.now();
       try { this.ink.releasePointerCapture(erase.pointerId); } catch { /* The system can revoke capture. */ }
       if (erase.changed) {
-        this.erasedBefore = erase.before; this.eraseUndoButton.disabled = false;
+        this.eraseHistory.record(erase.before, this.strokes); this.updateEraseHistory();
         this.changed();
       }
       this.state(); return;
@@ -487,6 +495,10 @@ class ProbeView extends ItemView {
       if (this.active || this.erasing) return; // The next completed edit schedules another save.
       void this.save().catch(e => this.fail(e));
     }, Math.max(0, Math.min(250, this.saveDue - performance.now())));
+  }
+  private updateEraseHistory(): void {
+    this.eraseUndoButton.disabled = !this.eraseHistory.depth;
+    this.eraseUndoButton.textContent = `恢复擦除（剩余 ${this.eraseHistory.depth} 步）`;
   }
   private async save(): Promise<void> {
     if (this.saveTask) return this.saveTask;
@@ -522,6 +534,9 @@ class ProbeView extends ItemView {
       saveError: this.saveError, pointer: this.pointerStats, errors: this.errors,
       editVersion: this.editVersion, savedEditVersion: this.savedEditVersion,
       inputEndings: this.endings, timings: this.timings, pressureGain: this.pressureGain,
+      touchDiagnostics: { ...this.touchDiagnostics, activeTouches: this.touches.size, mode: this.mode,
+        scrollTop: this.scroll.scrollTop, maxScrollTop: this.scroll.scrollHeight - this.scroll.clientHeight },
+      eraseUndoDepth: this.eraseHistory.depth,
       drawing: 'Incremental active ink + committed canvas; finger pan while pen is up; whole-stroke eraser',
       privacy: 'No handwriting coordinates, recognized text or PDF bytes included. Local file only.' };
     const path = `${ROOT}/diagnostic-${Date.now()}-${uniqueId()}.json`;

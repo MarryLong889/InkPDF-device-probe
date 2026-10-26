@@ -1,5 +1,5 @@
 {
-  "probeVersion": "0.0.2",
+  "probeVersion": "0.0.3",
   "status": "PASS",
   "browser": "145.0.7632.6",
   "checks": [
@@ -11,6 +11,8 @@
     "Write failure remains visibly unsaved; retry restores 21st stroke",
     "Capture loss and height-only resize do not split pen stroke; final pointerup endpoint saved; palm cannot pan during pen contact",
     "One-finger pan works in writing mode after pen-up without creating strokes",
+    "Finger landing during cooldown can pan later without lifting; 64px contact is accepted",
+    "Two erase transactions restore in order and persist",
     "Whole-stroke eraser decreases count, one-step restore works, erased state survives reload"
   ],
   "notRun": [

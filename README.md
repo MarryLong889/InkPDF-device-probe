@@ -1,8 +1,8 @@
 # InkPDF 最小设备探针
 
-当前本地版本 0.0.2，验证单页合成 PDF、笔输入、保存重开和 Worker。仍不是完整 PDF 批注或 OCR 插件。
+当前本地版本 0.0.3，验证单页合成 PDF、笔输入、保存重开和 Worker。仍不是完整 PDF 批注或 OCR 插件。
 
-修复分析、iPad 更新与复测步骤：[docs/IPAD_RETEST_0.0.2.md](docs/IPAD_RETEST_0.0.2.md)。
+修复分析、iPad 更新与复测步骤：[docs/IPAD_RETEST_0.0.3.md](docs/IPAD_RETEST_0.0.3.md)。
 
 ## 构建与检查
 

@@ -1,7 +1,7 @@
 {
   "id": "inkpdf-device-probe",
   "name": "InkPDF Device Probe",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "minAppVersion": "1.11.4",
   "description": "Test one PDF page, Pencil input, immutable saves and Worker capabilities. Test vault only.",
   "author": "InkPDF",
