@@ -11,3 +11,4 @@
 .inkpdf-probe-committed { position: absolute; inset: 0; pointer-events: none; }
 .inkpdf-probe-gain { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
 .inkpdf-probe-gain select { min-height: 40px; }
+.inkpdf-probe-source { font-size: 12px; overflow-wrap: anywhere; }

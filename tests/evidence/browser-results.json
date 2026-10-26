@@ -1,5 +1,5 @@
 {
-  "probeVersion": "0.0.3",
+  "probeVersion": "0.0.4",
   "status": "PASS",
   "browser": "145.0.7632.6",
   "checks": [
@@ -13,7 +13,10 @@
     "One-finger pan works in writing mode after pen-up without creating strokes",
     "Finger landing during cooldown can pan later without lifting; 64px contact is accepted",
     "Two erase transactions restore in order and persist",
-    "Whole-stroke eraser decreases count, one-step restore works, erased state survives reload"
+    "Whole-stroke eraser decreases count, one-step restore works, erased state survives reload",
+    "Vault two-page PDF opens page 1, saves/reloads exact ink; rename preserves association, replacement isolates ink, source unchanged and not copied",
+    "Missing PDF fails visibly; another PDF can still open without losing existing annotations",
+    "Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1"
   ],
   "notRun": [
     "real Obsidian",

@@ -207,10 +207,30 @@ var VIEW = "inkpdf-device-probe";
 var ROOT = "InkPDF-Probe";
 var InkPDFProbe = class extends import_obsidian.Plugin {
   lastRun = null;
+  lastPdfPath = null;
+  opening = false;
+  async remember() {
+    await this.saveData({ lastRun: this.lastRun, lastPdfPath: this.lastPdfPath });
+  }
+  choosePdf() {
+    const plugin = this;
+    new class extends import_obsidian.FuzzySuggestModal {
+      getItems() {
+        return plugin.app.vault.getFiles().filter((f) => f.extension.toLowerCase() === "pdf");
+      }
+      getItemText(file) {
+        return file.path;
+      }
+      onChooseItem(file) {
+        void plugin.open(true, file.path).catch((e) => new import_obsidian.Notice(String(e)));
+      }
+    }(this.app).open();
+  }
   async onload() {
     try {
       const data = await this.loadData();
       if (validId(data?.lastRun)) this.lastRun = data.lastRun;
+      if (typeof data?.lastPdfPath === "string" && data.lastPdfPath.toLowerCase().endsWith(".pdf")) this.lastPdfPath = data.lastPdfPath;
     } catch {
       new import_obsidian.Notice("InkPDF\uFF1A\u8BBE\u7F6E\u8BFB\u53D6\u5931\u8D25\uFF0C\u53EF\u65B0\u5EFA\u6D4B\u8BD5\uFF1B\u672A\u5220\u9664\u65E7\u6D4B\u8BD5\u6587\u4EF6");
     }
@@ -221,33 +241,42 @@ var InkPDFProbe = class extends import_obsidian.Plugin {
     this.addCommand({ id: "new-run", name: "\u65B0\u5EFA\u72EC\u7ACB\u8BBE\u5907\u6D4B\u8BD5", callback: () => {
       void this.open(true).catch((e) => new import_obsidian.Notice(String(e)));
     } });
+    this.addCommand({ id: "open-pdf", name: "\u6253\u5F00\u4ED3\u5E93 PDF\uFF08\u7B2C 1 \u9875\uFF09", callback: () => this.choosePdf() });
     this.addRibbonIcon("pen-tool", "InkPDF \u8BBE\u5907\u63A2\u9488", () => {
       void this.open(false).catch((e) => new import_obsidian.Notice(String(e)));
     });
   }
-  async open(fresh) {
-    const old = this.app.workspace.getLeavesOfType(VIEW);
-    if (old.length && !fresh) {
-      await this.app.workspace.revealLeaf(old[0]);
-      return;
+  async open(fresh, pdfPath) {
+    if (this.opening) return;
+    this.opening = true;
+    try {
+      const old = this.app.workspace.getLeavesOfType(VIEW);
+      if (old.length && !fresh) {
+        await this.app.workspace.revealLeaf(old[0]);
+        return;
+      }
+      for (const leaf2 of old) {
+        if (leaf2.view instanceof ProbeView) await leaf2.view.flush();
+        leaf2.detach();
+      }
+      if (fresh || !this.lastRun) {
+        this.lastRun = uniqueId();
+        if (fresh) this.lastPdfPath = pdfPath ?? null;
+        await this.remember();
+      }
+      const leaf = this.app.workspace.getLeaf("tab");
+      await leaf.setViewState({ type: VIEW, active: true });
+      await this.app.workspace.revealLeaf(leaf);
+    } finally {
+      this.opening = false;
     }
-    for (const leaf2 of old) {
-      if (leaf2.view instanceof ProbeView) await leaf2.view.flush();
-      leaf2.detach();
-    }
-    if (fresh || !this.lastRun) {
-      this.lastRun = uniqueId();
-      await this.saveData({ lastRun: this.lastRun });
-    }
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.setViewState({ type: VIEW, active: true });
-    await this.app.workspace.revealLeaf(leaf);
   }
 };
 var ProbeView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
+    this.pdfPath = plugin.lastPdfPath;
   }
   plugin;
   runId = "";
@@ -273,6 +302,7 @@ var ProbeView = class extends import_obsidian.ItemView {
   saveDue = 0;
   renderedWidth = 0;
   pdf;
+  pdfTask;
   page;
   viewport;
   renderTask;
@@ -311,6 +341,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     ignoredTouches: 0
   };
   report = {};
+  pdfPath;
   getViewType() {
     return VIEW;
   }
@@ -354,6 +385,9 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.contentEl.createEl("h2", { text: "InkPDF \xB7 \u6700\u5C0F\u8BBE\u5907\u63A2\u9488" });
     this.contentEl.createEl("p", { text: "\u4EC5\u6D4B\u8BD5\u5355\u9875 PDF\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u6574\u7B14\u6A61\u76AE\u652F\u6301\u8FDE\u7EED\u6062\u590D\uFF0C\u6700\u591A\u4FDD\u7559 20 \u6B65\uFF08\u672C\u6B21\u6253\u5F00\u671F\u95F4\uFF09\u3002" });
     const controls = this.contentEl.createDiv({ cls: "inkpdf-probe-controls" });
+    this.button(controls, "\u6253\u5F00\u4ED3\u5E93 PDF", () => this.plugin.choosePdf());
+    const sourceLabel = this.contentEl.createDiv({ cls: "inkpdf-probe-source" });
+    sourceLabel.textContent = this.pdfPath ? `${this.pdfPath} \xB7 \u4EC5\u7B2C 1 \u9875 \xB7 \u539F\u6587\u4EF6\u53EA\u8BFB\uFF1B\u76F8\u540C\u5185\u5BB9\u526F\u672C\u5171\u4EAB\u7B14\u8FF9` : "\u5408\u6210 PDF \u8BBE\u5907\u6D4B\u8BD5";
     const modeButton = this.button(controls, "\u6A21\u5F0F\uFF1A\u4E66\u5199", () => {
       this.finish("mode-change");
       this.pan = void 0;
@@ -481,7 +515,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       cryptoSubtle: !!globalThis.crypto?.subtle,
       crossOriginIsolated: globalThis.crossOriginIsolated,
       limits: LIMITS,
-      scope: "One synthetic PDF; no OCR, no multitouch gesture engine",
+      scope: this.pdfPath ? "Vault PDF page 1; read-only source; no OCR" : "One synthetic PDF; no OCR",
       manualResults: { pencil: "NOT RUN", pressureVariation: "NOT RUN", palmRejection: "NOT RUN", appRestart: "NOT RUN", backgroundKill: "NOT RUN" }
     };
     void this.probeWorker();
@@ -489,23 +523,33 @@ var ProbeView = class extends import_obsidian.ItemView {
       await this.initialize();
     } catch (e) {
       this.ready = false;
-      this.fail(e);
+      if (!this.closed) this.fail(e);
     }
   }
   async initialize() {
-    const bytes = Uint8Array.from(atob(PDF_BASE64), (c) => c.charCodeAt(0));
+    let bytes;
+    if (this.pdfPath) {
+      const file = this.app.vault.getAbstractFileByPath(this.pdfPath);
+      if (!(file instanceof import_obsidian.TFile) || file.extension.toLowerCase() !== "pdf") throw new Error("PDF \u4E0D\u5B58\u5728\u6216\u5DF2\u6539\u540D\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\uFF1B\u65E7\u6279\u6CE8\u4FDD\u7559");
+      if (file.stat.size > 20 * 1024 * 1024) throw new Error("\u5F53\u524D\u8BD5\u9A8C\u4EC5\u652F\u6301\u4E0D\u8D85\u8FC7 20 MiB \u7684 PDF");
+      bytes = new Uint8Array(await this.app.vault.readBinary(file));
+      if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error("PDF \u4E3A\u7A7A\u6216\u8D85\u8FC7 20 MiB");
+    } else bytes = Uint8Array.from(atob(PDF_BASE64), (c) => c.charCodeAt(0));
     const sourceHash = await sha256(bytes);
     if (!this.plugin.lastRun) {
       this.plugin.lastRun = uniqueId();
-      await this.plugin.saveData({ lastRun: this.plugin.lastRun });
+      await this.plugin.remember();
     }
-    this.runId = this.plugin.lastRun;
+    this.runId = this.pdfPath ? `pdf-${sourceHash}-p1` : this.plugin.lastRun;
     const dir = `${ROOT}/${this.runId}`;
     for (const p of [ROOT, dir, `${dir}/snapshots`]) await this.folder(p);
-    const pdfPath = `${dir}/probe.pdf`;
-    if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
-    const diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
-    if (await sha256(diskBytes) !== sourceHash) throw new Error("\u6D4B\u8BD5 PDF \u5DF2\u6539\u53D8\uFF0C\u62D2\u7EDD\u8986\u76D6\u6216\u53E0\u52A0");
+    let diskBytes = bytes;
+    if (!this.pdfPath) {
+      const pdfPath = `${dir}/probe.pdf`;
+      if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
+      diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
+      if (await sha256(diskBytes) !== sourceHash) throw new Error("\u6D4B\u8BD5 PDF \u5DF2\u6539\u53D8\uFF0C\u62D2\u7EDD\u8986\u76D6\u6216\u53E0\u52A0");
+    }
     this.store = new ProbeStore({
       list: async () => {
         const { files } = await this.app.vault.adapter.list(`${dir}/snapshots`);
@@ -523,19 +567,18 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.report.sourceHash = sourceHash;
     const started = performance.now();
     const lib = await (0, import_obsidian.loadPdfJs)();
+    if (this.closed) return;
     if (typeof lib?.getDocument !== "function") throw new Error("loadPdfJs \u672A\u63D0\u4F9B getDocument");
     this.report.pdfjsVersion = lib.version ?? "unknown";
     const task = lib.getDocument({ data: diskBytes, isEvalSupported: false, enableXfa: false, disableAutoFetch: true, disableStream: true });
+    this.pdfTask = task;
     this.pdf = await task.promise;
-    if (this.closed) {
-      await this.pdf.destroy();
-      return;
-    }
-    if (this.pdf.numPages !== 1) throw new Error("\u6D4B\u8BD5\u5939\u5177\u5E94\u5F53\u53EA\u6709\u4E00\u9875");
+    if (this.closed) return;
+    if (!this.pdfPath && this.pdf.numPages !== 1) throw new Error("\u6D4B\u8BD5\u5939\u5177\u5E94\u5F53\u53EA\u6709\u4E00\u9875");
     this.page = await this.pdf.getPage(1);
     await this.render();
     if (this.closed) return;
-    this.report.pdf = { status: "PASS", elapsedMs: Math.round(performance.now() - started), pages: 1 };
+    this.report.pdf = { status: "PASS", elapsedMs: Math.round(performance.now() - started), pages: this.pdf.numPages, selectedPage: 1, sourceReadOnly: true };
     this.ready = true;
     this.state();
   }
@@ -864,7 +907,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.finish("flush");
     window.clearTimeout(this.saveTimer);
     this.saveDue = 0;
-    if (!this.store) throw new Error("\u5B58\u50A8\u672A\u521D\u59CB\u5316");
+    if (!this.store) return;
     await this.save();
     this.state();
   }
@@ -908,6 +951,6 @@ var ProbeView = class extends import_obsidian.ItemView {
     if (this.store) await this.flush().catch((e) => this.fail(e));
     await this.renderTask?.promise.catch(() => void 0);
     this.page?.cleanup();
-    await this.pdf?.destroy().catch((e) => this.fail(e));
+    await this.pdfTask?.destroy().catch((e) => this.fail(e));
   }
 };

@@ -23,9 +23,21 @@ function create(path: string, text: string) {
   f[path] = text; localStorage.setItem(storageKey, JSON.stringify(f));
 }
 const leaves: WorkspaceLeaf[] = [];
+export class TFile {
+  extension = 'pdf';
+  stat: { size: number };
+  constructor(public path: string) { this.stat = { size: atob(readFiles()[path]).length }; }
+}
+export class FuzzySuggestModal<T> {
+  constructor(_app: unknown) {}
+  open() {}
+}
 let factory: (leaf: WorkspaceLeaf) => ItemView;
 export const app = {
   vault: {
+    getFiles: () => Object.keys(readFiles()).filter(p => p.endsWith('.pdf')).map(p => new TFile(p)),
+    getAbstractFileByPath: (p: string) => p in readFiles() && p.endsWith('.pdf') ? new TFile(p) : null,
+    readBinary: async (f: TFile) => Uint8Array.from(atob(readFiles()[f.path]), c => c.charCodeAt(0)).buffer,
     adapter: {
       exists: async (p: string) => p in readFiles() || p.endsWith('/snapshots') || p === 'InkPDF-Probe' || /^InkPDF-Probe\/[\w-]+$/.test(p),
       read: async (p: string) => { const f = readFiles(); if (!(p in f)) throw new Error('missing'); return f[p]; },
@@ -63,7 +75,7 @@ export class ItemView {
 }
 export class Plugin {
   app = app;
-  manifest = { version: '0.0.3' };
+  manifest = { version: '0.0.4' };
   commands: Record<string, () => void> = {};
   async loadData() { return JSON.parse(localStorage.getItem('inkpdf-test-settings') ?? 'null'); }
   async saveData(v: unknown) { localStorage.setItem('inkpdf-test-settings', JSON.stringify(v)); }

@@ -1,4 +1,4 @@
-import { ItemView, Notice, Plugin, WorkspaceLeaf, loadPdfJs, apiVersion } from 'obsidian';
+import { ItemView, Notice, Plugin, WorkspaceLeaf, loadPdfJs, apiVersion, FuzzySuggestModal, TFile } from 'obsidian';
 import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, penWidth, hitsStroke, EraseHistory } from './core';
 import { workerProbe } from './capabilities';
 import { PDF_BASE64 } from './generated/fixture';
@@ -8,34 +8,52 @@ const ROOT = 'InkPDF-Probe';
 type Viewport = { width: number; height: number; transform: number[] };
 type RenderTask = { promise: Promise<void>; cancel(): void };
 type PdfPage = { getViewport(options: { scale: number }): Viewport; render(options: unknown): RenderTask; cleanup(): void };
-type PdfDocument = { numPages: number; getPage(n: number): Promise<PdfPage>; destroy(): Promise<void> };
+type PdfDocument = { numPages: number; getPage(n: number): Promise<PdfPage> };
 
 export default class InkPDFProbe extends Plugin {
   lastRun: string | null = null;
+  lastPdfPath: string | null = null;
+  private opening = false;
+  async remember(): Promise<void> { await this.saveData({ lastRun: this.lastRun, lastPdfPath: this.lastPdfPath }); }
+  choosePdf(): void {
+    const plugin = this;
+    new class extends FuzzySuggestModal<TFile> {
+      getItems(): TFile[] { return plugin.app.vault.getFiles().filter(f => f.extension.toLowerCase() === 'pdf'); }
+      getItemText(file: TFile): string { return file.path; }
+      onChooseItem(file: TFile): void { void plugin.open(true, file.path).catch(e => new Notice(String(e))); }
+    }(this.app).open();
+  }
   async onload(): Promise<void> {
     try {
       const data = await this.loadData();
       if (validId(data?.lastRun)) this.lastRun = data.lastRun;
+      if (typeof data?.lastPdfPath === 'string' && data.lastPdfPath.toLowerCase().endsWith('.pdf')) this.lastPdfPath = data.lastPdfPath;
     } catch { new Notice('InkPDF：设置读取失败，可新建测试；未删除旧测试文件'); }
     this.registerView(VIEW, leaf => new ProbeView(leaf, this));
     this.addCommand({ id: 'open', name: '打开 / 继续设备探针', callback: () => { void this.open(false).catch(e => new Notice(String(e))); } });
     this.addCommand({ id: 'new-run', name: '新建独立设备测试', callback: () => { void this.open(true).catch(e => new Notice(String(e))); } });
+    this.addCommand({ id: 'open-pdf', name: '打开仓库 PDF（第 1 页）', callback: () => this.choosePdf() });
     this.addRibbonIcon('pen-tool', 'InkPDF 设备探针', () => { void this.open(false).catch(e => new Notice(String(e))); });
   }
-  async open(fresh: boolean): Promise<void> {
-    const old = this.app.workspace.getLeavesOfType(VIEW);
-    if (old.length && !fresh) { await this.app.workspace.revealLeaf(old[0]); return; }
-    for (const leaf of old) {
-      if (leaf.view instanceof ProbeView) await leaf.view.flush();
-      leaf.detach();
-    }
-    if (fresh || !this.lastRun) {
-      this.lastRun = uniqueId();
-      await this.saveData({ lastRun: this.lastRun });
-    }
-    const leaf = this.app.workspace.getLeaf('tab');
-    await leaf.setViewState({ type: VIEW, active: true });
-    await this.app.workspace.revealLeaf(leaf);
+  async open(fresh: boolean, pdfPath?: string): Promise<void> {
+    if (this.opening) return;
+    this.opening = true;
+    try {
+      const old = this.app.workspace.getLeavesOfType(VIEW);
+      if (old.length && !fresh) { await this.app.workspace.revealLeaf(old[0]); return; }
+      for (const leaf of old) {
+        if (leaf.view instanceof ProbeView) await leaf.view.flush();
+        leaf.detach();
+      }
+      if (fresh || !this.lastRun) {
+        this.lastRun = uniqueId();
+        if (fresh) this.lastPdfPath = pdfPath ?? null;
+        await this.remember();
+      }
+      const leaf = this.app.workspace.getLeaf('tab');
+      await leaf.setViewState({ type: VIEW, active: true });
+      await this.app.workspace.revealLeaf(leaf);
+      } finally { this.opening = false; }
   }
 }
 
@@ -63,6 +81,7 @@ class ProbeView extends ItemView {
   private saveDue = 0;
   private renderedWidth = 0;
   private pdf?: PdfDocument;
+  private pdfTask?: { promise: Promise<PdfDocument>; destroy(): Promise<void> };
   private page?: PdfPage;
   private viewport?: Viewport;
   private renderTask?: RenderTask;
@@ -90,7 +109,8 @@ class ProbeView extends ItemView {
     pressureMin: null as number | null, pressureMax: null as number | null, penSamples: 0,
     lostCapture: 0, captureFailed: 0, touchPanMoves: 0, ignoredTouches: 0 };
   private report: Record<string, unknown> = {};
-  constructor(leaf: WorkspaceLeaf, private plugin: InkPDFProbe) { super(leaf); }
+  private readonly pdfPath: string | null;
+  constructor(leaf: WorkspaceLeaf, private plugin: InkPDFProbe) { super(leaf); this.pdfPath = plugin.lastPdfPath; }
   getViewType(): string { return VIEW; }
   getDisplayText(): string { return 'InkPDF 设备探针'; }
   getIcon(): string { return 'pen-tool'; }
@@ -125,6 +145,9 @@ class ProbeView extends ItemView {
     this.contentEl.createEl('h2', { text: 'InkPDF · 最小设备探针' });
     this.contentEl.createEl('p', { text: '仅测试单页 PDF。请先关闭 iPad 随手写 / Scribble。笔抬起后可单指滚动；笔落下时暂停手指导航。整笔橡皮支持连续恢复，最多保留 20 步（本次打开期间）。' });
     const controls = this.contentEl.createDiv({ cls: 'inkpdf-probe-controls' });
+    this.button(controls, '打开仓库 PDF', () => this.plugin.choosePdf());
+    const sourceLabel = this.contentEl.createDiv({ cls: 'inkpdf-probe-source' });
+    sourceLabel.textContent = this.pdfPath ? `${this.pdfPath} · 仅第 1 页 · 原文件只读；相同内容副本共享笔迹` : '合成 PDF 设备测试';
     const modeButton = this.button(controls, '模式：书写', () => {
       this.finish('mode-change');
       this.pan = undefined;
@@ -216,27 +239,38 @@ class ProbeView extends ItemView {
       userAgent: navigator.userAgent, devicePixelRatio, secureContext: isSecureContext,
       pointerEvents: typeof PointerEvent !== 'undefined', coalescedEvents: typeof PointerEvent !== 'undefined' && 'getCoalescedEvents' in PointerEvent.prototype,
       cryptoSubtle: !!globalThis.crypto?.subtle, crossOriginIsolated: globalThis.crossOriginIsolated,
-      limits: LIMITS, scope: 'One synthetic PDF; no OCR, no multitouch gesture engine',
+      limits: LIMITS, scope: this.pdfPath ? 'Vault PDF page 1; read-only source; no OCR' : 'One synthetic PDF; no OCR',
       manualResults: { pencil: 'NOT RUN', pressureVariation: 'NOT RUN', palmRejection: 'NOT RUN', appRestart: 'NOT RUN', backgroundKill: 'NOT RUN' } };
     void this.probeWorker();
     try { await this.initialize(); }
-    catch (e) { this.ready = false; this.fail(e); }
+    catch (e) { this.ready = false; if (!this.closed) this.fail(e); }
   }
 
   private async initialize(): Promise<void> {
-    const bytes = Uint8Array.from(atob(PDF_BASE64), c => c.charCodeAt(0));
+    let bytes: Uint8Array;
+    if (this.pdfPath) {
+      const file = this.app.vault.getAbstractFileByPath(this.pdfPath);
+      if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'pdf') throw new Error('PDF 不存在或已改名，请重新选择；旧批注保留');
+      // shortcut: whole-file hashing/rendering is capped at 20 MiB until large-file testing.
+      if (file.stat.size > 20 * 1024 * 1024) throw new Error('当前试验仅支持不超过 20 MiB 的 PDF');
+      bytes = new Uint8Array(await this.app.vault.readBinary(file));
+      if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error('PDF 为空或超过 20 MiB');
+    } else bytes = Uint8Array.from(atob(PDF_BASE64), c => c.charCodeAt(0));
     const sourceHash = await sha256(bytes);
     if (!this.plugin.lastRun) {
       this.plugin.lastRun = uniqueId();
-      await this.plugin.saveData({ lastRun: this.plugin.lastRun });
+      await this.plugin.remember();
     }
-    this.runId = this.plugin.lastRun;
+    this.runId = this.pdfPath ? `pdf-${sourceHash}-p1` : this.plugin.lastRun;
     const dir = `${ROOT}/${this.runId}`;
     for (const p of [ROOT, dir, `${dir}/snapshots`]) await this.folder(p);
-    const pdfPath = `${dir}/probe.pdf`;
-    if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
-    const diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
-    if (await sha256(diskBytes) !== sourceHash) throw new Error('测试 PDF 已改变，拒绝覆盖或叠加');
+    let diskBytes = bytes;
+    if (!this.pdfPath) {
+      const pdfPath = `${dir}/probe.pdf`;
+      if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
+      diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
+      if (await sha256(diskBytes) !== sourceHash) throw new Error('测试 PDF 已改变，拒绝覆盖或叠加');
+    }
     this.store = new ProbeStore({
       list: async () => {
         const { files } = await this.app.vault.adapter.list(`${dir}/snapshots`);
@@ -252,17 +286,19 @@ class ProbeView extends ItemView {
     this.report.sourceHash = sourceHash;
     const started = performance.now();
     const lib = await loadPdfJs();
+    if (this.closed) return;
     if (typeof lib?.getDocument !== 'function') throw new Error('loadPdfJs 未提供 getDocument');
     this.report.pdfjsVersion = lib.version ?? 'unknown';
     const task = lib.getDocument({ data: diskBytes, isEvalSupported: false, enableXfa: false, disableAutoFetch: true, disableStream: true });
-    // shortcut: this fixture is unencrypted; general PDF/password support belongs to a later stage.
+    this.pdfTask = task;
+    // shortcut: password-protected PDFs fail with PDF.js's error; password UI is out of scope.
     this.pdf = await task.promise as PdfDocument;
-    if (this.closed) { await this.pdf.destroy(); return; }
-    if (this.pdf.numPages !== 1) throw new Error('测试夹具应当只有一页');
+    if (this.closed) return;
+    if (!this.pdfPath && this.pdf.numPages !== 1) throw new Error('测试夹具应当只有一页');
     this.page = await this.pdf.getPage(1);
     await this.render();
     if (this.closed) return;
-    this.report.pdf = { status: 'PASS', elapsedMs: Math.round(performance.now() - started), pages: 1 };
+    this.report.pdf = { status: 'PASS', elapsedMs: Math.round(performance.now() - started), pages: this.pdf.numPages, selectedPage: 1, sourceReadOnly: true };
     this.ready = true;
     this.state();
   }
@@ -523,7 +559,7 @@ class ProbeView extends ItemView {
   async flush(): Promise<void> {
     this.finish('flush');
     window.clearTimeout(this.saveTimer); this.saveDue = 0;
-    if (!this.store) throw new Error('存储未初始化');
+    if (!this.store) return;
     await this.save();
     this.state();
   }
@@ -551,6 +587,6 @@ class ProbeView extends ItemView {
     if (this.store) await this.flush().catch(e => this.fail(e));
     await this.renderTask?.promise.catch(() => undefined);
     this.page?.cleanup();
-    await this.pdf?.destroy().catch(e => this.fail(e));
+    await this.pdfTask?.destroy().catch(e => this.fail(e));
   }
 }

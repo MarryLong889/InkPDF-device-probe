@@ -178,11 +178,86 @@ try {
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).filter(p => p.includes('diagnostic-')).length >= 2);
   const finalReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
-  assert.equal(finalReport.probeVersion, '0.0.3');
+  assert.equal(finalReport.probeVersion, '0.0.4');
   assert.equal(finalReport.strokesSaved, 21);
-  await page.screenshot({ path: '.test/probe-0.0.3.png' });
+  await page.screenshot({ path: '.test/probe-0.0.4.png' });
+  // Independent two-page PDF, loaded through the vault API rather than the embedded fixture.
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 5 0 R >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 5 0 R >>',
+    '<< /Length 0 >>\nstream\n\nendstream'];
+  let realPdf = '%PDF-1.4\n', offsets = [0];
+  for (let i = 0; i < objects.length; i++) { offsets.push(realPdf.length); realPdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`; }
+  const xref = realPdf.length;
+  realPdf += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(n => String(n).padStart(10, '0') + ' 00000 n \n').join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  const pdfA = Buffer.from(realPdf).toString('base64'), pdfB = Buffer.from(realPdf + '% different revision\n').toString('base64');
+  await page.evaluate(async data => {
+    const files = window.readFiles(); files['Documents/A.pdf'] = data;
+    localStorage.setItem('inkpdf-test-files', JSON.stringify(files));
+    await window.plugin.open(true, 'Documents/A.pdf');
+  }, pdfA);
+  const viewState = () => page.evaluate(() => {
+    const v = window.mockApp.workspace.getLeavesOfType()[0].view;
+    return { ready: v.ready, run: v.runId, strokes: v.strokes, pdf: v.report.pdf };
+  });
+  assert.equal((await viewState()).ready, true);
+  assert.equal((await viewState()).pdf.pages, 2);
+  assert.equal((await viewState()).pdf.selectedPage, 1);
+  const aRect = await page.locator('.inkpdf-probe-ink').boundingBox();
+  await page.mouse.move(aRect.x + 100, aRect.y + 100); await page.mouse.down();
+  await page.mouse.move(aRect.x + 180, aRect.y + 140); await page.mouse.up();
+  await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
+  const savedA = await viewState();
+  assert.equal(savedA.strokes.length, 1);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('1 笔'));
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  await page.evaluate(async () => {
+    const files = window.readFiles(); files['Documents/Renamed.pdf'] = files['Documents/A.pdf']; delete files['Documents/A.pdf'];
+    localStorage.setItem('inkpdf-test-files', JSON.stringify(files));
+    await window.plugin.open(true, 'Documents/Renamed.pdf');
+  });
+  assert.equal((await viewState()).run, savedA.run);
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  await page.evaluate(async data => {
+    const files = window.readFiles(); files['Documents/Renamed.pdf'] = data;
+    localStorage.setItem('inkpdf-test-files', JSON.stringify(files));
+    await window.plugin.open(true, 'Documents/Renamed.pdf');
+  }, pdfB);
+  assert.notEqual((await viewState()).run, savedA.run);
+  assert.equal((await viewState()).strokes.length, 0);
+  await page.evaluate(async data => {
+    const files = window.readFiles(); files['Documents/Renamed.pdf'] = data;
+    localStorage.setItem('inkpdf-test-files', JSON.stringify(files));
+    await window.plugin.open(true, 'Documents/Renamed.pdf');
+  }, pdfA);
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  assert.equal(await page.evaluate(() => window.readFiles()['Documents/Renamed.pdf']), pdfA);
+  assert.equal(await page.evaluate(() => Object.keys(window.readFiles()).some(p => p.startsWith('InkPDF-Probe/pdf-') && p.endsWith('.pdf'))), false);
+  checks.push('Vault two-page PDF opens page 1, saves/reloads exact ink; rename preserves association, replacement isolates ink, source unchanged and not copied');
+  await page.evaluate(async () => { await window.plugin.open(true, 'missing.pdf'); });
+  assert.equal((await viewState()).ready, false);
+  await page.evaluate(async () => { await window.plugin.open(true, 'Documents/Renamed.pdf'); });
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  checks.push('Missing PDF fails visibly; another PDF can still open without losing existing annotations');
+  await page.evaluate(async () => {
+    const files = window.readFiles(); files['Documents/Broken.pdf'] = btoa('This is not a PDF');
+    localStorage.setItem('inkpdf-test-files', JSON.stringify(files));
+    await window.plugin.open(true, 'Documents/Broken.pdf');
+  });
+  assert.equal((await viewState()).ready, false);
+  await page.evaluate(async () => { await window.plugin.open(true, 'Documents/Renamed.pdf'); });
+  assert.deepEqual((await viewState()).strokes, savedA.strokes);
+  assert.equal(await page.evaluate(() => window.readFiles()['Documents/Broken.pdf']), Buffer.from('This is not a PDF').toString('base64'));
+  await page.getByRole('button', { name: '导出诊断', exact: true }).click();
+  const pdfReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
+  assert.equal(pdfReport.pdf.selectedPage, 1);
+  assert.equal(pdfReport.pdf.sourceReadOnly, true);
+  assert.equal(JSON.stringify(pdfReport).includes('Renamed.pdf'), false);
+  await page.screenshot({ path: '.test/vault-pdf-0.0.4.png' });
+  checks.push('Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1');
   assert.equal(failures.length, 0, failures.join('\n'));
-  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.3', status: 'PASS', browser: await browser.version(), checks,
+  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.4', status: 'PASS', browser: await browser.version(), checks,
     notRun: ['real Obsidian', 'iPad WKWebView', 'Apple Pencil', 'OCR', 'GitHub sync'] }, null, 2));
   console.log(checks.join('\n'));
 } finally {
