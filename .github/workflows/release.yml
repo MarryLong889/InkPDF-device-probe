@@ -1,0 +1,68 @@
+name: Publish BRAT release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - main.js
+      - manifest.json
+      - styles.css
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: inkpdf-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate plugin files and version
+        id: plugin
+        shell: bash
+        run: |
+          node --check main.js
+          node <<'NODE'
+          const fs = require('node:fs');
+          const assert = require('node:assert/strict');
+          const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          assert.equal(manifest.id, 'inkpdf-device-probe');
+          assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+          assert.match(manifest.minAppVersion, /^\d+\.\d+\.\d+$/);
+          assert.equal(manifest.isDesktopOnly, false);
+          for (const name of ['main.js', 'manifest.json', 'styles.css']) {
+            assert.ok(fs.statSync(name).isFile() && fs.statSync(name).size > 0, name);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${manifest.version}\n`);
+          NODE
+
+      - name: Publish exactly three BRAT assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" > /dev/null 2>&1; then
+            echo "Release $VERSION already exists. Keep releases immutable; bump manifest.json version for an update."
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/inkpdf-release-notes.md" <<'NOTES'
+          InkPDF minimal device probe for PDF rendering, Pencil input, save/reopen and Worker tests.
+
+          Install with BRAT using MarryLong889/InkPDF-device-probe.
+          Only main.js, manifest.json and styles.css are installed.
+          Use a test vault. This is not the complete annotation/OCR plugin; iPad validation is still required.
+          NOTES
+          gh release create "$VERSION" main.js manifest.json styles.css \
+            --target "$GITHUB_SHA" --title "$VERSION" --draft \
+            --notes-file "$RUNNER_TEMP/inkpdf-release-notes.md"
+          gh release view "$VERSION" --json assets --jq '[.assets[].name] | sort' > "$RUNNER_TEMP/inkpdf-assets.json"
+          node -e "const a=require('node:assert/strict'); const fs=require('node:fs'); a.deepEqual(JSON.parse(fs.readFileSync(process.argv[1],'utf8')),['main.js','manifest.json','styles.css']);" "$RUNNER_TEMP/inkpdf-assets.json"
+          gh release edit "$VERSION" --draft=false --latest
