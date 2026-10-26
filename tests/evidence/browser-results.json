@@ -1,0 +1,23 @@
+{
+  "probeVersion": "0.0.2",
+  "status": "PASS",
+  "browser": "145.0.7632.6",
+  "checks": [
+    "Real PDF.js 6.4.299 page render in Chromium with mocked Obsidian host; module Worker + basic WASM PASS",
+    "20 synthetic pen strokes saved; touch ignored (synthetic events, NOT Apple Pencil validation)",
+    "Zoom and full browser reload preserve all PDF-space samples exactly",
+    "Diagnostic export contains counts/capabilities, no stroke coordinates",
+    "Synthetic source PDF bytes unchanged",
+    "Write failure remains visibly unsaved; retry restores 21st stroke",
+    "Capture loss and height-only resize do not split pen stroke; final pointerup endpoint saved; palm cannot pan during pen contact",
+    "One-finger pan works in writing mode after pen-up without creating strokes",
+    "Whole-stroke eraser decreases count, one-step restore works, erased state survives reload"
+  ],
+  "notRun": [
+    "real Obsidian",
+    "iPad WKWebView",
+    "Apple Pencil",
+    "OCR",
+    "GitHub sync"
+  ]
+}

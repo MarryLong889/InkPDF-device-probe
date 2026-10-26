@@ -39,6 +39,7 @@ function parseSnapshot(raw, runId, sourceHash) {
   for (const s of v.strokes) {
     if (!s || !validId(s.id) || ids.has(s.id) || !["pen", "mouse"].includes(s.pointerType) || typeof s.interrupted !== "boolean" || !Array.isArray(s.points) || !s.points.length || s.points.length > LIMITS.pointsPerStroke) throw new Error("\u7B14\u8FF9\u7ED3\u6784\u65E0\u6548");
     ids.add(s.id);
+    if (s.pressureGain !== void 0 && (!Number.isFinite(s.pressureGain) || s.pressureGain < 1 || s.pressureGain > 4)) throw new Error("\u538B\u611F\u589E\u76CA\u65E0\u6548");
     let lastTime = -1;
     for (const p of s.points) {
       if (!Array.isArray(p) || p.length !== 4 || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || Math.abs(p[0]) > 1e5 || Math.abs(p[1]) > 1e5 || !(p[2] === null || Number.isFinite(p[2]) && p[2] >= 0 && p[2] <= 1) || !Number.isFinite(p[3]) || p[3] < 0 || p[3] < lastTime) throw new Error("\u7B14\u8FF9\u70B9\u65E0\u6548");
@@ -62,6 +63,24 @@ async function sha256(bytes) {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 var textHash = (text) => sha256(new TextEncoder().encode(text));
+function penWidth(p, gain = 1) {
+  return p[2] === null ? 1.8 : 0.8 + Math.min(1, Math.max(0, p[2] * gain)) * 3;
+}
+function hitsStroke(stroke, from, to, radius) {
+  const pointDistance = (p, a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+  };
+  const cross = (a, b, p) => (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+  for (let i = 0; i < stroke.points.length; i++) {
+    const a = stroke.points[Math.max(0, i - 1)], b = stroke.points[i];
+    const intersects = cross(from, to, a) * cross(from, to, b) < 0 && cross(a, b, from) * cross(a, b, to) < 0;
+    const distance = Math.min(pointDistance(a, from, to), pointDistance(b, from, to), pointDistance(from, a, b), pointDistance(to, a, b));
+    if (intersects || distance <= radius + Math.max(penWidth(a, stroke.pressureGain), penWidth(b, stroke.pressureGain)) / 2) return true;
+  }
+  return false;
+}
 var ProbeStore = class _ProbeStore {
   constructor(files, runId, sourceHash) {
     this.files = files;
@@ -91,7 +110,7 @@ var ProbeStore = class _ProbeStore {
     this.baseline = parent;
     return strokes;
   }
-  async save(strokes) {
+  async save(strokes, editVersion = 0) {
     if (!this.pending) {
       const check2 = new _ProbeStore(this.files, this.runId, this.sourceHash);
       await check2.load();
@@ -106,7 +125,7 @@ var ProbeStore = class _ProbeStore {
       };
       const raw = JSON.stringify(snapshot);
       const frozen = parseSnapshot(raw, this.runId, this.sourceHash);
-      this.pending = { path: `${String(snapshot.revision).padStart(6, "0")}-${uniqueId()}.json`, raw, snapshot: frozen };
+      this.pending = { path: `${String(snapshot.revision).padStart(6, "0")}-${uniqueId()}.json`, raw, snapshot: frozen, editVersion };
     }
     const p = this.pending;
     if (!(await this.files.list()).includes(p.path)) await this.files.create(p.path, p.raw);
@@ -117,7 +136,7 @@ var ProbeStore = class _ProbeStore {
     this.baseline = check.baseline;
     this.revision = check.revision;
     this.pending = null;
-    return p.snapshot.strokes.length;
+    return { count: p.snapshot.strokes.length, editVersion: p.editVersion };
   }
 };
 
@@ -211,7 +230,23 @@ var ProbeView = class extends import_obsidian.ItemView {
   store;
   strokes = [];
   savedCount = 0;
+  editVersion = 0;
+  savedEditVersion = 0;
   active;
+  erasing;
+  erasedBefore;
+  eraseUndoButton;
+  tool = "pen";
+  pressureGain = 2.5;
+  touches = /* @__PURE__ */ new Set();
+  pan;
+  lastPenAt = -Infinity;
+  totalPoints = 0;
+  frame = 0;
+  paintedPoints = 0;
+  saveTimer;
+  saveDue = 0;
+  renderedWidth = 0;
   pdf;
   page;
   viewport;
@@ -230,6 +265,11 @@ var ProbeView = class extends import_obsidian.ItemView {
   sheet;
   pdfCanvas;
   ink;
+  committedInk;
+  inputStatus;
+  timings = { paints: 0, maxPaintMs: 0, saves: 0, maxSaveMs: 0, maxEventGapMs: 0 };
+  endings = [];
+  lastSampleTime = 0;
   errors = [];
   pointerStats = {
     penDown: 0,
@@ -239,7 +279,11 @@ var ProbeView = class extends import_obsidian.ItemView {
     coalescedSamples: 0,
     pressureMin: null,
     pressureMax: null,
-    penSamples: 0
+    penSamples: 0,
+    lostCapture: 0,
+    captureFailed: 0,
+    touchPanMoves: 0,
+    ignoredTouches: 0
   };
   report = {};
   getViewType() {
@@ -267,7 +311,7 @@ var ProbeView = class extends import_obsidian.ItemView {
   }
   state() {
     if (!this.ready) return;
-    const suffix = this.saveError ? `\u4FDD\u5B58\u5931\u8D25\uFF1A${this.saveError}` : this.savedCount === this.strokes.length ? `\u5DF2\u4FDD\u5B58\u5E76\u8BFB\u56DE\u6821\u9A8C \xB7 revision ${this.store?.revision ?? 0}` : "\u5C1A\u6709\u672A\u4FDD\u5B58\u7B14\u8FF9";
+    const suffix = this.active || this.erasing ? "\u64CD\u4F5C\u4E2D\uFF0C\u62AC\u7B14\u540E\u4FDD\u5B58" : this.saveError ? `\u4FDD\u5B58\u5931\u8D25\uFF1A${this.saveError}` : this.savedEditVersion === this.editVersion ? `\u5DF2\u4FDD\u5B58\u5E76\u8BFB\u56DE\u6821\u9A8C \xB7 revision ${this.store?.revision ?? 0}` : "\u5C1A\u6709\u672A\u4FDD\u5B58\u7B14\u8FF9";
     this.status.textContent = `${this.strokes.length} \u7B14 / ${LIMITS.strokes} \xB7 ${suffix}`;
   }
   async folder(path) {
@@ -283,16 +327,41 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("inkpdf-probe");
     this.contentEl.createEl("h2", { text: "InkPDF \xB7 \u6700\u5C0F\u8BBE\u5907\u63A2\u9488" });
-    this.contentEl.createEl("p", { text: "\u4EC5\u6D4B\u8BD5\u8FD9\u4E00\u9875\u5408\u6210 PDF\u3002\u7B14\u53EF\u5199\u3001\u624B\u6307\u4E0D\u753B\uFF1B\u5199\u5165\u6A21\u5F0F\u7528\u5DE5\u5177\u680F\u7F29\u653E\uFF0C\u6D4F\u89C8\u6A21\u5F0F\u7528\u624B\u6307\u6EDA\u52A8\u3002\u4E0D\u662F\u5B8C\u6574\u6279\u6CE8\u63D2\u4EF6\u3002" });
+    this.contentEl.createEl("p", { text: "\u4EC5\u6D4B\u8BD5\u5355\u9875 PDF\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u6574\u7B14\u6A61\u76AE\u53EF\u6062\u590D\u6700\u8FD1\u4E00\u6B21\u64E6\u9664\u3002" });
     const controls = this.contentEl.createDiv({ cls: "inkpdf-probe-controls" });
     const modeButton = this.button(controls, "\u6A21\u5F0F\uFF1A\u4E66\u5199", () => {
-      this.finish(true);
+      this.finish("mode-change");
+      this.pan = void 0;
       this.mode = this.mode === "write" ? "browse" : "write";
       modeButton.textContent = this.mode === "write" ? "\u6A21\u5F0F\uFF1A\u4E66\u5199" : "\u6A21\u5F0F\uFF1A\u6D4F\u89C8";
       this.ink.style.touchAction = this.mode === "write" ? "none" : "pan-x pan-y";
+      this.scroll.style.touchAction = this.ink.style.touchAction;
+    });
+    const toolButton = this.button(controls, "\u5DE5\u5177\uFF1A\u94A2\u7B14", () => {
+      this.finish("tool-change");
+      this.tool = this.tool === "pen" ? "eraser" : "pen";
+      toolButton.textContent = this.tool === "pen" ? "\u5DE5\u5177\uFF1A\u94A2\u7B14" : "\u5DE5\u5177\uFF1A\u6574\u7B14\u6A61\u76AE";
+    });
+    this.eraseUndoButton = this.button(controls, "\u6062\u590D\u4E0A\u6B21\u64E6\u9664", () => {
+      this.finish("restore");
+      if (!this.erasedBefore) return;
+      this.strokes = this.erasedBefore;
+      this.erasedBefore = void 0;
+      this.eraseUndoButton.disabled = true;
+      this.changed();
+      this.redraw();
+    });
+    this.eraseUndoButton.disabled = true;
+    const gainLabel = controls.createEl("label", { cls: "inkpdf-probe-gain", text: "\u538B\u611F\u589E\u76CA " });
+    const gain = gainLabel.createEl("select", { attr: { "aria-label": "\u538B\u611F\u589E\u76CA\uFF08\u53EA\u5F71\u54CD\u65B0\u7B14\u8FF9\uFF09" } });
+    for (const n of [1, 2.5, 4]) gain.createEl("option", { text: `${n}\xD7`, attr: { value: String(n) } });
+    gain.value = "2.5";
+    gain.addEventListener("change", () => {
+      this.finish("pressure-change");
+      this.pressureGain = Number(gain.value);
     });
     for (const zoom of [1, 1.5, 2]) this.button(controls, `${zoom * 100}%`, async () => {
-      this.finish(true);
+      this.finish("zoom");
       this.zoom = zoom;
       await this.render();
     });
@@ -307,6 +376,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       }
       this.strokes = loaded;
       this.savedCount = loaded.length;
+      this.totalPoints = loaded.reduce((n, s) => n + s.points.length, 0);
       this.report.reopenReadback = { status: "PASS", strokeCount: loaded.length, revision: this.store.revision };
       this.redraw();
       this.state();
@@ -316,41 +386,55 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.button(controls, "\u5BFC\u51FA\u8BCA\u65AD", () => this.exportReport());
     this.status = this.contentEl.createDiv({ cls: "inkpdf-probe-status", attr: { role: "status", "aria-live": "polite" }, text: "\u521D\u59CB\u5316\u4E2D\u2026" });
     this.capability = this.contentEl.createDiv({ cls: "inkpdf-probe-capability", text: "Worker \u68C0\u6D4B\u4E2D\u2026" });
+    this.inputStatus = this.contentEl.createDiv({ cls: "inkpdf-probe-capability", text: "\u7B14\u538B\u529B\uFF1A\u5C1A\u65E0\u91C7\u6837\u3002Scribble \u72B6\u6001\u9700\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u786E\u8BA4\u3002" });
     this.scroll = this.contentEl.createDiv({ cls: "inkpdf-probe-scroll" });
+    this.scroll.style.touchAction = "none";
     this.sheet = this.scroll.createDiv({ cls: "inkpdf-probe-sheet" });
     this.pdfCanvas = this.sheet.createEl("canvas");
+    this.committedInk = this.sheet.createEl("canvas", { cls: "inkpdf-probe-committed" });
     this.ink = this.sheet.createEl("canvas", { cls: "inkpdf-probe-ink", attr: { "aria-label": "PDF \u624B\u5199\u6D4B\u8BD5\u753B\u5E03" } });
     this.ink.style.touchAction = "none";
-    this.registerDomEvent(this.ink, "pointerdown", (e) => this.down(e));
-    this.registerDomEvent(this.ink, "pointermove", (e) => this.move(e));
-    this.registerDomEvent(this.ink, "pointerup", (e) => {
-      if (e.pointerId !== this.active?.pointerId) return;
-      this.finish(false);
+    this.registerDomEvent(this.scroll, "pointerdown", (e) => {
+      if (e.pointerType === "touch" || e.target === this.ink) this.down(e);
     });
-    this.registerDomEvent(this.ink, "pointercancel", (e) => {
-      if (e.pointerId === this.active?.pointerId) {
+    this.registerDomEvent(document, "pointermove", (e) => this.move(e));
+    this.registerDomEvent(document, "pointerup", (e) => {
+      this.endTouch(e);
+      if (e.pointerId === this.erasing?.pointerId) {
+        this.eraseAt(e);
+        this.finish("pointerup");
+        return;
+      }
+      if (e.pointerId !== this.active?.pointerId) return;
+      this.sample(e, true);
+      this.finish("pointerup");
+    });
+    this.registerDomEvent(document, "pointercancel", (e) => {
+      this.endTouch(e);
+      if (e.pointerId === this.active?.pointerId || e.pointerId === this.erasing?.pointerId) {
         this.pointerStats.canceled++;
-        this.finish(true);
+        this.finish("pointercancel");
       }
     });
     this.registerDomEvent(this.ink, "lostpointercapture", (e) => {
-      if (e.pointerId === this.active?.pointerId) this.finish(true);
+      if (e.pointerId === this.active?.pointerId || e.pointerId === this.erasing?.pointerId) this.pointerStats.lostCapture++;
     });
     this.registerDomEvent(document, "visibilitychange", () => {
       if (document.hidden) {
-        this.finish(true);
+        this.finish("hidden");
         void this.flush().catch((e) => this.fail(e));
       }
     });
     this.registerDomEvent(window, "pagehide", () => {
-      this.finish(true);
+      this.finish("pagehide");
       void this.flush().catch((e) => this.fail(e));
     });
     let resizeTimer;
     const observer = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        this.finish(true);
+        if (Math.abs(this.scroll.clientWidth - this.renderedWidth) < 1) return;
+        this.finish("resize-width");
         void this.render().catch((e) => this.fail(e));
       }, 150);
     });
@@ -358,6 +442,10 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.register(() => {
       observer.disconnect();
       window.clearTimeout(resizeTimer);
+    });
+    this.register(() => {
+      cancelAnimationFrame(this.frame);
+      window.clearTimeout(this.saveTimer);
     });
     this.report = {
       probeVersion: this.plugin.manifest.version,
@@ -407,6 +495,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     }, this.runId, sourceHash);
     this.strokes = await this.store.load();
     this.savedCount = this.strokes.length;
+    this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
     this.report.loadedFromDisk = { strokeCount: this.savedCount, revision: this.store.revision };
     this.report.sourceHash = sourceHash;
     const started = performance.now();
@@ -440,6 +529,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     await previous?.promise.catch(() => void 0);
     if (generation !== this.renderGeneration || this.closed) return;
     const base = this.page.getViewport({ scale: 1 });
+    this.renderedWidth = this.scroll.clientWidth;
     const scale = Math.max(0.2, Math.min(1.2, (this.scroll.clientWidth - 24) / base.width)) * this.zoom;
     const viewport = this.page.getViewport({ scale });
     pdfPoint(viewport.transform, 0, 0);
@@ -447,7 +537,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.dpr = Math.min(devicePixelRatio || 1, 2, 4096 / Math.max(viewport.width, viewport.height));
     this.sheet.style.width = `${viewport.width}px`;
     this.sheet.style.height = `${viewport.height}px`;
-    for (const canvas of [this.pdfCanvas, this.ink]) {
+    for (const canvas of [this.pdfCanvas, this.committedInk, this.ink]) {
       canvas.width = Math.ceil(viewport.width * this.dpr);
       canvas.height = Math.ceil(viewport.height * this.dpr);
       canvas.style.width = `${viewport.width}px`;
@@ -469,111 +559,258 @@ var ProbeView = class extends import_obsidian.ItemView {
     }
     if (generation === this.renderGeneration && !this.closed) this.redraw();
   }
-  redraw() {
-    if (!this.viewport) return;
-    const ctx = this.ink.getContext("2d");
-    if (!ctx) return;
+  context(canvas, clear = false) {
+    if (!this.viewport) return null;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, this.ink.width, this.ink.height);
+    if (clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
     const [a, b, c, d, e, f] = this.viewport.transform.map((n) => n * this.dpr);
     ctx.setTransform(a, b, c, d, e, f);
     ctx.strokeStyle = "#155ac4";
     ctx.fillStyle = "#155ac4";
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    for (const stroke of this.active ? [...this.strokes, this.active.stroke] : this.strokes) {
-      const width = (p) => p[2] === null ? 1.8 : 0.8 + p[2] * 3;
-      const first = stroke.points[0];
-      if (!first) continue;
-      if (stroke.points.length === 1) {
-        ctx.beginPath();
-        ctx.arc(first[0], first[1], width(first) / 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      for (let i = 1; i < stroke.points.length; i++) {
-        const p = stroke.points[i], prev = stroke.points[i - 1];
-        ctx.lineWidth = (width(p) + width(prev)) / 2;
-        ctx.beginPath();
-        ctx.moveTo(prev[0], prev[1]);
-        ctx.lineTo(p[0], p[1]);
-        ctx.stroke();
-      }
+    return ctx;
+  }
+  drawStroke(ctx, stroke, start = 0) {
+    const width = (p) => penWidth(p, stroke.pressureGain);
+    const first = stroke.points[0];
+    if (!first) return;
+    if (start === 0) {
+      ctx.beginPath();
+      ctx.arc(first[0], first[1], width(first) / 2, 0, Math.PI * 2);
+      ctx.fill();
     }
+    for (let i = Math.max(1, start); i < stroke.points.length; i++) {
+      const p = stroke.points[i], prev = stroke.points[i - 1];
+      ctx.lineWidth = (width(p) + width(prev)) / 2;
+      ctx.beginPath();
+      ctx.moveTo(prev[0], prev[1]);
+      ctx.lineTo(p[0], p[1]);
+      ctx.stroke();
+    }
+  }
+  redraw() {
+    const ctx = this.context(this.committedInk, true);
+    if (ctx) for (const s of this.strokes) this.drawStroke(ctx, s);
+    this.context(this.ink, true);
+    this.paintedPoints = 0;
+    this.paintActive();
+  }
+  paintActive() {
+    const started = performance.now();
+    const ctx = this.context(this.ink);
+    if (ctx && this.active) {
+      this.drawStroke(ctx, this.active.stroke, this.paintedPoints);
+      this.paintedPoints = this.active.stroke.points.length;
+      const p = this.active.stroke.points.at(-1)?.[2];
+      this.inputStatus.textContent = `\u5F53\u524D\u539F\u59CB\u538B\u529B ${p?.toFixed(3) ?? "\u65E0"} \xB7 \u672C\u6B21\u8303\u56F4 ${this.pointerStats.pressureMin?.toFixed(3) ?? "-"}\uFF5E${this.pointerStats.pressureMax?.toFixed(3) ?? "-"} \xB7 \u589E\u76CA ${this.pressureGain}\xD7`;
+    }
+    this.timings.paints++;
+    this.timings.maxPaintMs = Math.max(this.timings.maxPaintMs, performance.now() - started);
+  }
+  schedulePaint() {
+    if (this.frame) return;
+    this.frame = requestAnimationFrame(() => {
+      this.frame = 0;
+      this.paintActive();
+    });
   }
   down(e) {
     if (e.pointerType === "touch") {
       this.pointerStats.touchDown++;
+      this.touches.add(e.pointerId);
+      if (this.mode === "browse") return;
+      e.preventDefault();
+      if (this.touches.size !== 1 || this.active || this.erasing || performance.now() - this.lastPenAt < 180 || Math.max(e.width, e.height) > 40) {
+        this.pan = void 0;
+        this.pointerStats.ignoredTouches++;
+        return;
+      }
+      this.pan = { id: e.pointerId, x: e.clientX, y: e.clientY, moving: false };
+      try {
+        this.ink.setPointerCapture(e.pointerId);
+      } catch {
+        this.pointerStats.captureFailed++;
+      }
       return;
     }
-    if (!this.ready || !this.viewport || this.mode !== "write" || this.active || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
-    if (this.strokes.length >= LIMITS.strokes || this.strokes.reduce((n, s) => n + s.points.length, 0) >= LIMITS.totalPoints) {
+    if (!this.ready || !this.viewport || this.mode !== "write" || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
+    if (this.active || this.erasing) this.finish("superseded-down");
+    if (this.tool === "pen" && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
       new import_obsidian.Notice("\u5DF2\u8FBE\u63A2\u9488\u4E0A\u9650\uFF0C\u8BF7\u5BFC\u51FA\u8BCA\u65AD\u540E\u65B0\u5EFA\u72EC\u7ACB\u6D4B\u8BD5");
       return;
     }
     e.preventDefault();
+    this.pan = void 0;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    this.lastPenAt = performance.now();
     if (e.pointerType === "pen") this.pointerStats.penDown++;
     else this.pointerStats.mouseDown++;
-    this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [] } };
     try {
       this.ink.setPointerCapture(e.pointerId);
     } catch {
+      this.pointerStats.captureFailed++;
     }
-    this.sample(e);
-    this.redraw();
-  }
-  sample(e) {
-    const active = this.active;
-    if (!active || !this.viewport) return;
-    if (active.stroke.points.length >= LIMITS.pointsPerStroke || this.strokes.reduce((n, s) => n + s.points.length, 0) + active.stroke.points.length >= LIMITS.totalPoints) {
-      this.finish(true);
-      new import_obsidian.Notice("\u7B14\u8FF9\u70B9\u6570\u8FBE\u5230\u63A2\u9488\u4E0A\u9650\uFF0C\u5DF2\u7ED3\u675F\u8BE5\u7B14");
+    if (this.tool === "eraser") {
+      this.erasing = { pointerId: e.pointerId, before: this.strokes.slice(), last: this.eventPoint(e), changed: false };
+      this.eraseAt(e);
+      this.state();
       return;
     }
+    this.erasedBefore = void 0;
+    this.eraseUndoButton.disabled = true;
+    this.paintedPoints = 0;
+    this.lastSampleTime = e.timeStamp;
+    this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain } };
+    this.sample(e);
+    this.schedulePaint();
+    this.state();
+  }
+  eventPoint(e) {
     const rect = this.ink.getBoundingClientRect();
-    const [x, y] = pdfPoint(
+    return pdfPoint(
       this.viewport.transform,
       (e.clientX - rect.left) * this.viewport.width / rect.width,
       (e.clientY - rect.top) * this.viewport.height / rect.height
     );
-    const pressure = e.pointerType === "pen" && Number.isFinite(e.pressure) ? Math.max(0, Math.min(1, e.pressure)) : null;
+  }
+  endTouch(e) {
+    if (e.pointerType !== "touch") return;
+    this.touches.delete(e.pointerId);
+    if (this.pan?.id === e.pointerId) this.pan = void 0;
+    try {
+      this.ink.releasePointerCapture(e.pointerId);
+    } catch {
+    }
+  }
+  eraseAt(e) {
+    const erase = this.erasing;
+    if (!erase || !this.viewport) return;
+    const to = this.eventPoint(e);
+    const radius = 10 / Math.hypot(this.viewport.transform[0], this.viewport.transform[1]);
+    const retained = this.strokes.filter((s) => !hitsStroke(s, erase.last, to, radius));
+    erase.last = to;
+    if (retained.length === this.strokes.length) return;
+    this.strokes = retained;
+    erase.changed = true;
+    this.redraw();
+    this.state();
+  }
+  sample(e, ending = false) {
+    const active = this.active;
+    if (!active || !this.viewport) return;
+    if (active.stroke.points.length >= LIMITS.pointsPerStroke || this.totalPoints + active.stroke.points.length >= LIMITS.totalPoints) {
+      this.finish("sample-limit");
+      new import_obsidian.Notice("\u7B14\u8FF9\u70B9\u6570\u8FBE\u5230\u63A2\u9488\u4E0A\u9650\uFF0C\u5DF2\u7ED3\u675F\u8BE5\u7B14");
+      return;
+    }
+    const [x, y] = this.eventPoint(e);
     const last = active.stroke.points.at(-1);
+    const pressure = ending && last ? last[2] : active.stroke.pointerType === "pen" && Number.isFinite(e.pressure) ? Math.max(0, Math.min(1, e.pressure)) : null;
     const t = Math.max(last?.[3] ?? 0, e.timeStamp - active.started, 0);
+    if (last && last[0] === x && last[1] === y && last[2] === pressure && last[3] === t) return;
     active.stroke.points.push([x, y, pressure, t]);
-    if (pressure !== null) {
+    this.timings.maxEventGapMs = Math.max(this.timings.maxEventGapMs, e.timeStamp - this.lastSampleTime);
+    this.lastSampleTime = Math.max(e.timeStamp, this.lastSampleTime);
+    if (pressure !== null && !ending) {
       this.pointerStats.penSamples++;
       this.pointerStats.pressureMin = Math.min(this.pointerStats.pressureMin ?? pressure, pressure);
       this.pointerStats.pressureMax = Math.max(this.pointerStats.pressureMax ?? pressure, pressure);
     }
   }
   move(e) {
+    if (e.pointerType === "touch") {
+      if (this.mode === "browse" || e.pointerId !== this.pan?.id || this.active || this.erasing) return;
+      e.preventDefault();
+      const p = this.pan;
+      if (!p.moving && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 8) return;
+      p.moving = true;
+      this.scroll.scrollLeft += p.x - e.clientX;
+      this.scroll.scrollTop += p.y - e.clientY;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      this.pointerStats.touchPanMoves++;
+      return;
+    }
+    if (e.pointerId === this.erasing?.pointerId) {
+      e.preventDefault();
+      this.eraseAt(e);
+      return;
+    }
     if (e.pointerId !== this.active?.pointerId) return;
     e.preventDefault();
     const points = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
     this.pointerStats.coalescedSamples += points.length;
-    for (const p of points.length ? points : [e]) this.sample(p);
-    this.redraw();
+    for (const p of points) this.sample(p);
+    this.sample(e);
+    this.schedulePaint();
   }
-  finish(interrupted) {
+  finish(reason) {
+    if (this.erasing) {
+      const erase = this.erasing;
+      this.erasing = void 0;
+      this.lastPenAt = performance.now();
+      try {
+        this.ink.releasePointerCapture(erase.pointerId);
+      } catch {
+      }
+      if (erase.changed) {
+        this.erasedBefore = erase.before;
+        this.eraseUndoButton.disabled = false;
+        this.changed();
+      }
+      this.state();
+      return;
+    }
     if (!this.active) return;
     const active = this.active;
     this.active = void 0;
-    active.stroke.interrupted = interrupted;
-    if (active.stroke.points.length) this.strokes.push(active.stroke);
+    active.stroke.interrupted = reason !== "pointerup";
+    this.lastPenAt = performance.now();
+    this.endings.push({ reason, samples: active.stroke.points.length, durationMs: active.stroke.points.at(-1)?.[3] ?? 0 });
+    this.endings = this.endings.slice(-30);
+    if (active.stroke.points.length) {
+      this.strokes.push(active.stroke);
+      const ctx = this.context(this.committedInk);
+      if (ctx) this.drawStroke(ctx, active.stroke);
+      this.changed();
+    }
     try {
       this.ink.releasePointerCapture(active.pointerId);
     } catch {
     }
-    this.redraw();
+    this.context(this.ink, true);
+    this.paintedPoints = 0;
     this.state();
-    void this.save().catch((e) => this.fail(e));
+  }
+  changed() {
+    this.editVersion++;
+    this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
+    this.state();
+    if (!this.saveDue) this.saveDue = performance.now() + 1500;
+    window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
+      this.saveDue = 0;
+      if (this.active || this.erasing) return;
+      void this.save().catch((e) => this.fail(e));
+    }, Math.max(0, Math.min(250, this.saveDue - performance.now())));
   }
   async save() {
     if (this.saveTask) return this.saveTask;
     if (!this.store) return;
     this.saveTask = (async () => {
-      while (this.savedCount < this.strokes.length) {
+      while (this.savedEditVersion < this.editVersion) {
+        if (this.active || this.erasing) break;
+        const version = this.editVersion;
+        const started = performance.now();
         const snapshot = JSON.parse(JSON.stringify(this.strokes));
-        this.savedCount = await this.store.save(snapshot);
+        const result = await this.store.save(snapshot, version);
+        this.savedCount = result.count;
+        this.savedEditVersion = result.editVersion;
+        this.timings.saves++;
+        this.timings.maxSaveMs = Math.max(this.timings.maxSaveMs, performance.now() - started);
         this.saveError = "";
         this.state();
       }
@@ -587,7 +824,9 @@ var ProbeView = class extends import_obsidian.ItemView {
     return this.saveTask;
   }
   async flush() {
-    this.finish(true);
+    this.finish("flush");
+    window.clearTimeout(this.saveTimer);
+    this.saveDue = 0;
     if (!this.store) throw new Error("\u5B58\u50A8\u672A\u521D\u59CB\u5316");
     await this.save();
     this.state();
@@ -604,6 +843,12 @@ var ProbeView = class extends import_obsidian.ItemView {
       saveError: this.saveError,
       pointer: this.pointerStats,
       errors: this.errors,
+      editVersion: this.editVersion,
+      savedEditVersion: this.savedEditVersion,
+      inputEndings: this.endings,
+      timings: this.timings,
+      pressureGain: this.pressureGain,
+      drawing: "Incremental active ink + committed canvas; finger pan while pen is up; whole-stroke eraser",
       privacy: "No handwriting coordinates, recognized text or PDF bytes included. Local file only."
     };
     const path = `${ROOT}/diagnostic-${Date.now()}-${uniqueId()}.json`;
@@ -611,6 +856,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     new import_obsidian.Notice(`\u8BCA\u65AD\u5DF2\u4FDD\u5B58\u5728 ${path}\uFF1B\u6CA1\u6709\u4E0A\u4F20`, 1e4);
   }
   async onClose() {
+    this.finish("view-close");
     this.closed = true;
     this.renderGeneration++;
     this.renderTask?.cancel();

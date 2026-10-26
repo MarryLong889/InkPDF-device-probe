@@ -8,3 +8,6 @@
 .inkpdf-probe-sheet { position: relative; background: white; box-shadow: 0 2px 12px #0002; }
 .inkpdf-probe-sheet canvas { display: block; }
 .inkpdf-probe-ink { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.inkpdf-probe-committed { position: absolute; inset: 0; pointer-events: none; }
+.inkpdf-probe-gain { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.inkpdf-probe-gain select { min-height: 40px; }
