@@ -1,5 +1,5 @@
 import { ItemView, Notice, Plugin, WorkspaceLeaf, loadPdfJs, apiVersion, FuzzySuggestModal, TFile } from 'obsidian';
-import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, penWidth, hitsStroke, EraseHistory } from './core';
+import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, strokeWidth, hitsStroke, EditHistory } from './core';
 import { workerProbe } from './capabilities';
 import { PDF_BASE64 } from './generated/fixture';
 
@@ -73,9 +73,12 @@ class ProbeView extends ItemView {
   private savedEditVersion = 0;
   private active?: { pointerId: number; started: number; stroke: Stroke };
   private erasing?: { pointerId: number; before: Stroke[]; last: [number, number]; changed: boolean };
-  private eraseHistory = new EraseHistory();
-  private eraseUndoButton!: HTMLButtonElement;
-  private tool: 'pen' | 'eraser' = 'pen';
+  private history = new EditHistory();
+  private undoButton!: HTMLButtonElement;
+  private redoButton!: HTMLButtonElement;
+  private tool: 'pen' | 'eraser' | 'highlighter' = 'pen';
+  private color = '#155ac4';
+  private size = 1;
   private toolButton!: HTMLButtonElement;
   private pageNumber: number;
   private navigating = false;
@@ -168,7 +171,7 @@ class ProbeView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass('inkpdf-probe');
     this.contentEl.createEl('h2', { text: 'InkPDF · 最小设备探针' });
-    this.contentEl.createEl('p', { text: '逐页 PDF 书写测试。请先关闭 iPad 随手写 / Scribble。笔抬起后可单指滚动；笔落下时暂停手指导航。整笔橡皮支持连续恢复，最多保留 20 步（当前页打开期间）。笔体双击暂不可用，请用工具按钮切换。' });
+    this.contentEl.createEl('p', { text: '逐页 PDF 书写测试。请先关闭 iPad 随手写 / Scribble。笔抬起后可单指滚动；笔落下时暂停手指导航。书写和擦除支持撤销/重做，最多保留 20 步（当前页打开期间）。笔体双击暂不可用，请用工具按钮切换。' });
     const controls = this.contentEl.createDiv({ cls: 'inkpdf-probe-controls' });
     this.button(controls, '打开仓库 PDF', () => this.plugin.choosePdf());
     const sourceLabel = this.contentEl.createDiv({ cls: 'inkpdf-probe-source' });
@@ -186,13 +189,23 @@ class ProbeView extends ItemView {
       this.scroll.style.touchAction = this.ink.style.touchAction;
     });
     this.toolButton = this.button(controls, '工具：钢笔', () => this.toggleTool());
-    this.eraseUndoButton = this.button(controls, '恢复擦除（剩余 0 步）', () => {
-      this.finish('restore');
-      this.strokes = this.eraseHistory.restore(this.strokes);
-      this.updateEraseHistory();
-      this.changed(); this.redraw();
+    this.button(controls, '荧光笔', () => {
+      if (!this.ready || this.navigating) return;
+      this.finish('tool-change'); this.tool = 'highlighter'; this.toolButton.textContent = '工具：荧光笔';
+      this.color = '#f4d03f'; color.value = this.color;
     });
-    this.eraseUndoButton.disabled = true;
+    const colorLabel = controls.createEl('label', { cls: 'inkpdf-probe-gain', text: '颜色 ' });
+    const color = colorLabel.createEl('select', { attr: { 'aria-label': '颜色（只影响新笔迹）' } });
+    for (const [name, value] of [['蓝', '#155ac4'], ['黑', '#202020'], ['红', '#d93025'], ['黄', '#f4d03f'], ['绿', '#16803c']]) color.createEl('option', { text: name, attr: { value } });
+    color.addEventListener('change', () => { this.finish('style-change'); this.color = color.value; });
+    const sizeLabel = controls.createEl('label', { cls: 'inkpdf-probe-gain', text: '粗细 ' });
+    const size = sizeLabel.createEl('select', { attr: { 'aria-label': '粗细（只影响新笔迹）' } });
+    for (const [name, value] of [['细', '0.5'], ['标准', '1'], ['粗', '2']]) size.createEl('option', { text: name, attr: { value } });
+    size.value = '1';
+    size.addEventListener('change', () => { this.finish('style-change'); this.size = Number(size.value); });
+    this.undoButton = this.button(controls, '撤销（0）', () => this.undoRedo(false));
+    this.redoButton = this.button(controls, '重做（0）', () => this.undoRedo(true));
+    this.updateHistory();
     const gainLabel = controls.createEl('label', { cls: 'inkpdf-probe-gain', text: '压感增益 ' });
     const gain = gainLabel.createEl('select', { attr: { 'aria-label': '压感增益（只影响新笔迹）' } });
     for (const n of [1, 2.5, 4]) gain.createEl('option', { text: `${n}×`, attr: { value: String(n) } });
@@ -381,9 +394,24 @@ class ProbeView extends ItemView {
     return ctx;
   }
   private drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, start = 0): void {
-      const width = (p: Point) => penWidth(p, stroke.pressureGain);
+      const width = (p: Point) => strokeWidth(stroke, p);
       const first = stroke.points[0];
       if (!first) return;
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle = stroke.color ?? '#155ac4';
+      if (stroke.kind === 'highlighter') {
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = width(first);
+        ctx.beginPath();
+        if (stroke.points.length === 1) {
+          ctx.arc(first[0], first[1], width(first) / 2, 0, Math.PI * 2); ctx.fill();
+        } else {
+          ctx.moveTo(first[0], first[1]);
+          for (const p of stroke.points.slice(1)) ctx.lineTo(p[0], p[1]);
+          ctx.stroke();
+        }
+        ctx.restore(); return;
+      }
       if (start === 0) {
         ctx.beginPath(); ctx.arc(first[0], first[1], width(first) / 2, 0, Math.PI * 2); ctx.fill();
       }
@@ -392,6 +420,7 @@ class ProbeView extends ItemView {
         ctx.lineWidth = (width(p) + width(prev)) / 2;
         ctx.beginPath(); ctx.moveTo(prev[0], prev[1]); ctx.lineTo(p[0], p[1]); ctx.stroke();
       }
+      ctx.restore();
   }
   private redraw(): void {
     const ctx = this.context(this.committedInk, true);
@@ -402,7 +431,8 @@ class ProbeView extends ItemView {
   }
   private paintActive(): void {
     const started = performance.now();
-    const ctx = this.context(this.ink);
+    // A translucent stroke is painted once as a whole path to avoid dark segment joins.
+    const ctx = this.context(this.ink, this.active?.stroke.kind === 'highlighter');
     if (ctx && this.active) {
       this.drawStroke(ctx, this.active.stroke, this.paintedPoints);
       this.paintedPoints = this.active.stroke.points.length;
@@ -434,7 +464,7 @@ class ProbeView extends ItemView {
     }
     if (!this.ready || this.navigating || !this.viewport || this.mode !== 'write' || !['pen', 'mouse'].includes(e.pointerType) || e.button !== 0) return;
     if (this.active || this.erasing) this.finish('superseded-down');
-    if (this.tool === 'pen' && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
+    if (this.tool !== 'eraser' && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
       new Notice('已达探针上限，请导出诊断后新建独立测试'); return;
     }
     e.preventDefault();
@@ -449,7 +479,7 @@ class ProbeView extends ItemView {
     }
     this.paintedPoints = 0;
     this.lastSampleTime = e.timeStamp;
-    this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain } };
+    this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain, kind: this.tool, color: this.color, size: this.size } };
     this.sample(e); this.schedulePaint(); this.state();
   }
   private eventPoint(e: PointerEvent): [number, number] {
@@ -530,7 +560,7 @@ class ProbeView extends ItemView {
       this.lastPenAt = performance.now();
       try { this.ink.releasePointerCapture(erase.pointerId); } catch { /* The system can revoke capture. */ }
       if (erase.changed) {
-        this.eraseHistory.record(erase.before, this.strokes); this.updateEraseHistory();
+        this.history.record(erase.before, this.strokes); this.updateHistory();
         this.changed();
       }
       this.state(); return;
@@ -543,7 +573,9 @@ class ProbeView extends ItemView {
     this.endings.push({ reason, samples: active.stroke.points.length, durationMs: active.stroke.points.at(-1)?.[3] ?? 0 });
     this.endings = this.endings.slice(-30);
     if (active.stroke.points.length) {
+      const before = this.strokes.slice();
       this.strokes.push(active.stroke);
+      this.history.record(before, this.strokes); this.updateHistory();
       const ctx = this.context(this.committedInk);
       if (ctx) this.drawStroke(ctx, active.stroke);
       this.changed();
@@ -563,9 +595,18 @@ class ProbeView extends ItemView {
       void this.save().catch(e => this.fail(e));
     }, Math.max(0, Math.min(250, this.saveDue - performance.now())));
   }
-  private updateEraseHistory(): void {
-    this.eraseUndoButton.disabled = !this.eraseHistory.depth;
-    this.eraseUndoButton.textContent = `恢复擦除（剩余 ${this.eraseHistory.depth} 步）`;
+  private undoRedo(redo: boolean): void {
+    if (!this.ready || this.navigating) return;
+    this.finish('history');
+    if (redo ? !this.history.redoDepth : !this.history.undoDepth) return;
+    this.strokes = redo ? this.history.redo(this.strokes) : this.history.undo(this.strokes);
+    this.updateHistory(); this.changed(); this.redraw();
+  }
+  private updateHistory(): void {
+    this.undoButton.disabled = !this.history.undoDepth;
+    this.redoButton.disabled = !this.history.redoDepth;
+    this.undoButton.textContent = `撤销（${this.history.undoDepth}）`;
+    this.redoButton.textContent = `重做（${this.history.redoDepth}）`;
   }
   private async save(): Promise<void> {
     if (this.saveTask) return this.saveTask;
@@ -603,7 +644,7 @@ class ProbeView extends ItemView {
       inputEndings: this.endings, timings: this.timings, pressureGain: this.pressureGain,
       touchDiagnostics: { ...this.touchDiagnostics, activeTouches: this.touches.size, mode: this.mode,
         scrollTop: this.scroll.scrollTop, maxScrollTop: this.scroll.scrollHeight - this.scroll.clientHeight },
-      eraseUndoDepth: this.eraseHistory.depth,
+      undoDepth: this.history.undoDepth, redoDepth: this.history.redoDepth,
       drawing: 'Incremental active ink + committed canvas; finger pan while pen is up; whole-stroke eraser',
       privacy: 'No handwriting coordinates, recognized text or PDF bytes included. Local file only.' };
     const path = `${ROOT}/diagnostic-${Date.now()}-${uniqueId()}.json`;

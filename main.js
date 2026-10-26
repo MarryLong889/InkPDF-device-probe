@@ -39,6 +39,9 @@ function parseSnapshot(raw, runId, sourceHash) {
   for (const s of v.strokes) {
     if (!s || !validId(s.id) || ids.has(s.id) || !["pen", "mouse"].includes(s.pointerType) || typeof s.interrupted !== "boolean" || !Array.isArray(s.points) || !s.points.length || s.points.length > LIMITS.pointsPerStroke) throw new Error("\u7B14\u8FF9\u7ED3\u6784\u65E0\u6548");
     ids.add(s.id);
+    if (s.kind !== void 0 && s.kind !== "pen" && s.kind !== "highlighter") throw new Error("\u7B14\u7C7B\u578B\u65E0\u6548");
+    if (s.color !== void 0 && (typeof s.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(s.color))) throw new Error("\u989C\u8272\u65E0\u6548");
+    if (s.size !== void 0 && (!Number.isFinite(s.size) || s.size < 0.5 || s.size > 3)) throw new Error("\u7B14\u753B\u5C3A\u5BF8\u65E0\u6548");
     if (s.pressureGain !== void 0 && (!Number.isFinite(s.pressureGain) || s.pressureGain < 1 || s.pressureGain > 4)) throw new Error("\u538B\u611F\u589E\u76CA\u65E0\u6548");
     let lastTime = -1;
     for (const p of s.points) {
@@ -66,6 +69,9 @@ var textHash = (text) => sha256(new TextEncoder().encode(text));
 function penWidth(p, gain = 1) {
   return p[2] === null ? 1.8 : 0.8 + Math.min(1, Math.max(0, p[2] * gain)) * 3;
 }
+function strokeWidth(s, p) {
+  return (s.kind === "highlighter" ? 12 : penWidth(p, s.pressureGain)) * (s.size ?? 1);
+}
 function hitsStroke(stroke, from, to, radius) {
   const pointDistance = (p, a, b) => {
     const dx = b[0] - a[0], dy = b[1] - a[1];
@@ -77,32 +83,39 @@ function hitsStroke(stroke, from, to, radius) {
     const a = stroke.points[Math.max(0, i - 1)], b = stroke.points[i];
     const intersects = cross(from, to, a) * cross(from, to, b) < 0 && cross(a, b, from) * cross(a, b, to) < 0;
     const distance = Math.min(pointDistance(a, from, to), pointDistance(b, from, to), pointDistance(from, a, b), pointDistance(to, a, b));
-    if (intersects || distance <= radius + Math.max(penWidth(a, stroke.pressureGain), penWidth(b, stroke.pressureGain)) / 2) return true;
+    if (intersects || distance <= radius + Math.max(strokeWidth(stroke, a), strokeWidth(stroke, b)) / 2) return true;
   }
   return false;
 }
-var EraseHistory = class {
-  entries = [];
-  get depth() {
-    return this.entries.length;
+var EditHistory = class {
+  past = [];
+  future = [];
+  get undoDepth() {
+    return this.past.length;
+  }
+  get redoDepth() {
+    return this.future.length;
   }
   record(before, after) {
-    const remaining = new Set(after.map((s) => s.id));
-    const removed = before.flatMap((stroke, index) => remaining.has(stroke.id) ? [] : [{ stroke, index }]);
-    if (!removed.length) return;
-    this.entries.push(removed);
-    while (this.entries.length > 20 || this.entries.reduce((n, entry) => n + entry.reduce((m, item) => m + item.stroke.points.length, 0), 0) > LIMITS.totalPoints) this.entries.shift();
+    this.past.push({ before: before.slice(), after: after.slice() });
+    this.future = [];
+    while (this.past.length > 20 || this.retainedPoints() > 2e5) this.past.shift();
   }
-  restore(current) {
-    const entry = this.entries.at(-1);
-    if (!entry) return current;
-    const restored = current.slice();
-    for (const { stroke, index } of entry) {
-      if (!restored.some((s) => s.id === stroke.id)) restored.splice(index, 0, stroke);
-    }
-    if (restored.length > LIMITS.strokes || restored.reduce((n, s) => n + s.points.length, 0) > LIMITS.totalPoints) throw new Error("\u6062\u590D\u4F1A\u8D85\u8FC7\u63A2\u9488\u4E0A\u9650\uFF1B\u5386\u53F2\u4FDD\u7559\uFF0C\u8BF7\u5148\u64E6\u9664\u5176\u4ED6\u7B14\u8FF9");
-    this.entries.pop();
-    return restored;
+  retainedPoints() {
+    const strokes = new Set(this.past.flatMap((e) => [...e.before, ...e.after]));
+    return [...strokes].reduce((n, s) => n + s.points.length, 0);
+  }
+  undo(current) {
+    const e = this.past.pop();
+    if (!e) return current;
+    this.future.push(e);
+    return e.before.slice();
+  }
+  redo(current) {
+    const e = this.future.pop();
+    if (!e) return current;
+    this.past.push(e);
+    return e.after.slice();
   }
 };
 var ProbeStore = class _ProbeStore {
@@ -295,9 +308,12 @@ var ProbeView = class extends import_obsidian.ItemView {
   savedEditVersion = 0;
   active;
   erasing;
-  eraseHistory = new EraseHistory();
-  eraseUndoButton;
+  history = new EditHistory();
+  undoButton;
+  redoButton;
   tool = "pen";
+  color = "#155ac4";
+  size = 1;
   toolButton;
   pageNumber;
   navigating = false;
@@ -412,7 +428,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("inkpdf-probe");
     this.contentEl.createEl("h2", { text: "InkPDF \xB7 \u6700\u5C0F\u8BBE\u5907\u63A2\u9488" });
-    this.contentEl.createEl("p", { text: "\u9010\u9875 PDF \u4E66\u5199\u6D4B\u8BD5\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u6574\u7B14\u6A61\u76AE\u652F\u6301\u8FDE\u7EED\u6062\u590D\uFF0C\u6700\u591A\u4FDD\u7559 20 \u6B65\uFF08\u5F53\u524D\u9875\u6253\u5F00\u671F\u95F4\uFF09\u3002\u7B14\u4F53\u53CC\u51FB\u6682\u4E0D\u53EF\u7528\uFF0C\u8BF7\u7528\u5DE5\u5177\u6309\u94AE\u5207\u6362\u3002" });
+    this.contentEl.createEl("p", { text: "\u9010\u9875 PDF \u4E66\u5199\u6D4B\u8BD5\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u4E66\u5199\u548C\u64E6\u9664\u652F\u6301\u64A4\u9500/\u91CD\u505A\uFF0C\u6700\u591A\u4FDD\u7559 20 \u6B65\uFF08\u5F53\u524D\u9875\u6253\u5F00\u671F\u95F4\uFF09\u3002\u7B14\u4F53\u53CC\u51FB\u6682\u4E0D\u53EF\u7528\uFF0C\u8BF7\u7528\u5DE5\u5177\u6309\u94AE\u5207\u6362\u3002" });
     const controls = this.contentEl.createDiv({ cls: "inkpdf-probe-controls" });
     this.button(controls, "\u6253\u5F00\u4ED3\u5E93 PDF", () => this.plugin.choosePdf());
     const sourceLabel = this.contentEl.createDiv({ cls: "inkpdf-probe-source" });
@@ -430,14 +446,32 @@ var ProbeView = class extends import_obsidian.ItemView {
       this.scroll.style.touchAction = this.ink.style.touchAction;
     });
     this.toolButton = this.button(controls, "\u5DE5\u5177\uFF1A\u94A2\u7B14", () => this.toggleTool());
-    this.eraseUndoButton = this.button(controls, "\u6062\u590D\u64E6\u9664\uFF08\u5269\u4F59 0 \u6B65\uFF09", () => {
-      this.finish("restore");
-      this.strokes = this.eraseHistory.restore(this.strokes);
-      this.updateEraseHistory();
-      this.changed();
-      this.redraw();
+    this.button(controls, "\u8367\u5149\u7B14", () => {
+      if (!this.ready || this.navigating) return;
+      this.finish("tool-change");
+      this.tool = "highlighter";
+      this.toolButton.textContent = "\u5DE5\u5177\uFF1A\u8367\u5149\u7B14";
+      this.color = "#f4d03f";
+      color.value = this.color;
     });
-    this.eraseUndoButton.disabled = true;
+    const colorLabel = controls.createEl("label", { cls: "inkpdf-probe-gain", text: "\u989C\u8272 " });
+    const color = colorLabel.createEl("select", { attr: { "aria-label": "\u989C\u8272\uFF08\u53EA\u5F71\u54CD\u65B0\u7B14\u8FF9\uFF09" } });
+    for (const [name, value] of [["\u84DD", "#155ac4"], ["\u9ED1", "#202020"], ["\u7EA2", "#d93025"], ["\u9EC4", "#f4d03f"], ["\u7EFF", "#16803c"]]) color.createEl("option", { text: name, attr: { value } });
+    color.addEventListener("change", () => {
+      this.finish("style-change");
+      this.color = color.value;
+    });
+    const sizeLabel = controls.createEl("label", { cls: "inkpdf-probe-gain", text: "\u7C97\u7EC6 " });
+    const size = sizeLabel.createEl("select", { attr: { "aria-label": "\u7C97\u7EC6\uFF08\u53EA\u5F71\u54CD\u65B0\u7B14\u8FF9\uFF09" } });
+    for (const [name, value] of [["\u7EC6", "0.5"], ["\u6807\u51C6", "1"], ["\u7C97", "2"]]) size.createEl("option", { text: name, attr: { value } });
+    size.value = "1";
+    size.addEventListener("change", () => {
+      this.finish("style-change");
+      this.size = Number(size.value);
+    });
+    this.undoButton = this.button(controls, "\u64A4\u9500\uFF080\uFF09", () => this.undoRedo(false));
+    this.redoButton = this.button(controls, "\u91CD\u505A\uFF080\uFF09", () => this.undoRedo(true));
+    this.updateHistory();
     const gainLabel = controls.createEl("label", { cls: "inkpdf-probe-gain", text: "\u538B\u611F\u589E\u76CA " });
     const gain = gainLabel.createEl("select", { attr: { "aria-label": "\u538B\u611F\u589E\u76CA\uFF08\u53EA\u5F71\u54CD\u65B0\u7B14\u8FF9\uFF09" } });
     for (const n of [1, 2.5, 4]) gain.createEl("option", { text: `${n}\xD7`, attr: { value: String(n) } });
@@ -675,9 +709,26 @@ var ProbeView = class extends import_obsidian.ItemView {
     return ctx;
   }
   drawStroke(ctx, stroke, start = 0) {
-    const width = (p) => penWidth(p, stroke.pressureGain);
+    const width = (p) => strokeWidth(stroke, p);
     const first = stroke.points[0];
     if (!first) return;
+    ctx.save();
+    ctx.strokeStyle = ctx.fillStyle = stroke.color ?? "#155ac4";
+    if (stroke.kind === "highlighter") {
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = width(first);
+      ctx.beginPath();
+      if (stroke.points.length === 1) {
+        ctx.arc(first[0], first[1], width(first) / 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.moveTo(first[0], first[1]);
+        for (const p of stroke.points.slice(1)) ctx.lineTo(p[0], p[1]);
+        ctx.stroke();
+      }
+      ctx.restore();
+      return;
+    }
     if (start === 0) {
       ctx.beginPath();
       ctx.arc(first[0], first[1], width(first) / 2, 0, Math.PI * 2);
@@ -691,6 +742,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       ctx.lineTo(p[0], p[1]);
       ctx.stroke();
     }
+    ctx.restore();
   }
   redraw() {
     const ctx = this.context(this.committedInk, true);
@@ -701,7 +753,7 @@ var ProbeView = class extends import_obsidian.ItemView {
   }
   paintActive() {
     const started = performance.now();
-    const ctx = this.context(this.ink);
+    const ctx = this.context(this.ink, this.active?.stroke.kind === "highlighter");
     if (ctx && this.active) {
       this.drawStroke(ctx, this.active.stroke, this.paintedPoints);
       this.paintedPoints = this.active.stroke.points.length;
@@ -742,7 +794,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     }
     if (!this.ready || this.navigating || !this.viewport || this.mode !== "write" || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
     if (this.active || this.erasing) this.finish("superseded-down");
-    if (this.tool === "pen" && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
+    if (this.tool !== "eraser" && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
       new import_obsidian.Notice("\u5DF2\u8FBE\u63A2\u9488\u4E0A\u9650\uFF0C\u8BF7\u5BFC\u51FA\u8BCA\u65AD\u540E\u65B0\u5EFA\u72EC\u7ACB\u6D4B\u8BD5");
       return;
     }
@@ -765,7 +817,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     }
     this.paintedPoints = 0;
     this.lastSampleTime = e.timeStamp;
-    this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain } };
+    this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain, kind: this.tool, color: this.color, size: this.size } };
     this.sample(e);
     this.schedulePaint();
     this.state();
@@ -868,8 +920,8 @@ var ProbeView = class extends import_obsidian.ItemView {
       } catch {
       }
       if (erase.changed) {
-        this.eraseHistory.record(erase.before, this.strokes);
-        this.updateEraseHistory();
+        this.history.record(erase.before, this.strokes);
+        this.updateHistory();
         this.changed();
       }
       this.state();
@@ -883,7 +935,10 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.endings.push({ reason, samples: active.stroke.points.length, durationMs: active.stroke.points.at(-1)?.[3] ?? 0 });
     this.endings = this.endings.slice(-30);
     if (active.stroke.points.length) {
+      const before = this.strokes.slice();
       this.strokes.push(active.stroke);
+      this.history.record(before, this.strokes);
+      this.updateHistory();
       const ctx = this.context(this.committedInk);
       if (ctx) this.drawStroke(ctx, active.stroke);
       this.changed();
@@ -908,9 +963,20 @@ var ProbeView = class extends import_obsidian.ItemView {
       void this.save().catch((e) => this.fail(e));
     }, Math.max(0, Math.min(250, this.saveDue - performance.now())));
   }
-  updateEraseHistory() {
-    this.eraseUndoButton.disabled = !this.eraseHistory.depth;
-    this.eraseUndoButton.textContent = `\u6062\u590D\u64E6\u9664\uFF08\u5269\u4F59 ${this.eraseHistory.depth} \u6B65\uFF09`;
+  undoRedo(redo) {
+    if (!this.ready || this.navigating) return;
+    this.finish("history");
+    if (redo ? !this.history.redoDepth : !this.history.undoDepth) return;
+    this.strokes = redo ? this.history.redo(this.strokes) : this.history.undo(this.strokes);
+    this.updateHistory();
+    this.changed();
+    this.redraw();
+  }
+  updateHistory() {
+    this.undoButton.disabled = !this.history.undoDepth;
+    this.redoButton.disabled = !this.history.redoDepth;
+    this.undoButton.textContent = `\u64A4\u9500\uFF08${this.history.undoDepth}\uFF09`;
+    this.redoButton.textContent = `\u91CD\u505A\uFF08${this.history.redoDepth}\uFF09`;
   }
   async save() {
     if (this.saveTask) return this.saveTask;
@@ -970,7 +1036,8 @@ var ProbeView = class extends import_obsidian.ItemView {
         scrollTop: this.scroll.scrollTop,
         maxScrollTop: this.scroll.scrollHeight - this.scroll.clientHeight
       },
-      eraseUndoDepth: this.eraseHistory.depth,
+      undoDepth: this.history.undoDepth,
+      redoDepth: this.history.redoDepth,
       drawing: "Incremental active ink + committed canvas; finger pan while pen is up; whole-stroke eraser",
       privacy: "No handwriting coordinates, recognized text or PDF bytes included. Local file only."
     };

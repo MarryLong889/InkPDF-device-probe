@@ -75,7 +75,7 @@ export class ItemView {
 }
 export class Plugin {
   app = app;
-  manifest = { version: '0.0.5' };
+  manifest = { version: '0.0.6' };
   commands: Record<string, () => void> = {};
   async loadData() { return JSON.parse(localStorage.getItem('inkpdf-test-settings') ?? 'null'); }
   async saveData(v: unknown) { localStorage.setItem('inkpdf-test-settings', JSON.stringify(v)); }

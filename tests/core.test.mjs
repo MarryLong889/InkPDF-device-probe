@@ -1,30 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ProbeStore, parseSnapshot, pdfPoint, penWidth, hitsStroke, EraseHistory } from '../.test/core.mjs';
+import { ProbeStore, parseSnapshot, pdfPoint, penWidth, hitsStroke, EditHistory } from '../.test/core.mjs';
 const hash = 'a'.repeat(64);
-test('multiple erase restores preserve order and newly drawn strokes', () => {
-  const h = new EraseHistory(), a = stroke(1), b = stroke(2), c = stroke(3), d = stroke(4);
-  h.record([a, b, c], [a, c]);
-  h.record([a, c], [c]);
-  assert.deepEqual(h.restore([c, d]), [a, c, d]);
-  assert.deepEqual(h.restore([a, c, d]), [a, b, c, d]);
-  assert.equal(h.depth, 0);
+test('history undoes and redoes drawing and erasing in order', () => {
+  const h = new EditHistory(), a = stroke(1), b = stroke(2);
+  h.record([], [a]); h.record([a], [a,b]); h.record([a,b], [b]);
+  assert.deepEqual(h.undo([b]), [a,b]);
+  assert.deepEqual(h.undo([a,b]), [a]);
+  assert.deepEqual(h.redo([a]), [a,b]);
+  assert.deepEqual(h.redo([a,b]), [b]);
 });
-test('erase history is bounded and no-op erasing does not consume a step', () => {
-  const h = new EraseHistory();
-  h.record([stroke(1)], [stroke(1)]);
-  assert.equal(h.depth, 0);
-  for (let i = 0; i < 25; i++) h.record([stroke(i)], []);
-  assert.equal(h.depth, 20);
+test('new edit invalidates redo and history is bounded', () => {
+  const h = new EditHistory(), a = stroke(1);
+  h.record([], [a]); h.undo([a]); h.record([], [stroke(2)]);
+  assert.equal(h.redoDepth, 0);
+  for (let i = 0; i < 25; i++) h.record([], [stroke(i)]);
+  assert.equal(h.undoDepth, 20);
 });
-test('restore limit failure retains history and current strokes', () => {
-  const h = new EraseHistory(), current = Array.from({ length: 200 }, (_, i) => stroke(i));
-  h.record([stroke(201)], []);
-  assert.throws(() => h.restore(current), /上限/);
-  assert.equal(h.depth, 1);
-  assert.equal(current.length, 200);
-});
-const stroke = n => ({ id: `stroke-${n}`, pointerType: 'pen', interrupted: false, points: [[10, 20, .4, 0], [11, 21, .8, 12]] });
+test('style validation rejects malformed values and preserves old strokes', () => {
+  const base = { probeFormat: 1, runId: 'run', sourceHash: hash, revision: 1, parentHash: null, strokes: [stroke(1)] };
+  assert.deepEqual(parseSnapshot(JSON.stringify(base), 'run', hash), base);
+  for (const style of [{kind:'bad'}, {color:'url(x)'}, {size:0}, {size:100}]) {
+    const v = structuredClone(base); Object.assign(v.strokes[0], style);
+    assert.throws(() => parseSnapshot(JSON.stringify(v), 'run', hash));
+  }
+});const stroke = n => ({ id: `stroke-${n}`, pointerType: 'pen', interrupted: false, points: [[10, 20, .4, 0], [11, 21, .8, 12]] });
 function memory() {
   const map = new Map();
   let failCreate = false, failRead = false;
@@ -153,4 +153,15 @@ test('failed save followed by erase does not claim the erase was persisted', asy
   m.failCreate(false);
   assert.deepEqual(await store.save([], 2), { count: 1, editVersion: 1 });
   assert.deepEqual(await store.save([], 2), { count: 0, editVersion: 2 });
+});
+
+test('styled strokes survive save undo redo and reload; broad marker edge erases', async () => {
+  const s = {...stroke(1), kind:'highlighter', color:'#f4d03f', size:2};
+  assert.equal(hitsStroke(s, [10,30], [10,30], 0), true);
+  const m = memory(), store = new ProbeStore(m.files, 'run', hash), h = new EditHistory();
+  h.record([], [s]); await store.save([s], 1);
+  await store.save(h.undo([s]), 2);
+  assert.deepEqual(await new ProbeStore(m.files,'run',hash).load(), []);
+  await store.save(h.redo([]), 3);
+  assert.deepEqual(await new ProbeStore(m.files,'run',hash).load(), [s]);
 });

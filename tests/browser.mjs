@@ -156,7 +156,7 @@ try {
   await page.mouse.click(eraserTarget.x, eraserTarget.y);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('21 笔') && document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   assert.equal((await latest()).strokes.length, 21);
-  await page.getByRole('button', { name: /恢复擦除/ }).click();
+  await page.getByRole('button', { name: /^撤销/ }).click();
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('22 笔') && document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   assert.equal((await latest()).strokes.length, 22);
   // Two distinct erases must be recoverable in reverse order.
@@ -164,8 +164,8 @@ try {
   await page.mouse.click(eraserTarget.x, eraserTarget.y + 45);
   await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
   assert.equal((await latest()).strokes.length, 20);
-  await page.getByRole('button', { name: /恢复擦除/ }).click();
-  await page.getByRole('button', { name: /恢复擦除/ }).click();
+  await page.getByRole('button', { name: /^撤销/ }).click();
+  await page.getByRole('button', { name: /^撤销/ }).click();
   await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
   assert.equal((await latest()).strokes.length, 22);
   checks.push('Two erase transactions restore in order and persist');
@@ -178,9 +178,9 @@ try {
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).filter(p => p.includes('diagnostic-')).length >= 2);
   const finalReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
-  assert.equal(finalReport.probeVersion, '0.0.5');
+  assert.equal(finalReport.probeVersion, '0.0.6');
   assert.equal(finalReport.strokesSaved, 21);
-  await page.screenshot({ path: '.test/probe-0.0.5.png' });
+  await page.screenshot({ path: '.test/probe-0.0.6.png' });
   // Independent two-page PDF, loaded through the vault API rather than the embedded fixture.
   const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 5 0 R >>',
@@ -296,10 +296,70 @@ try {
   assert.equal(pdfReport.pdf.selectedPage, 1);
   assert.equal(pdfReport.pdf.sourceReadOnly, true);
   assert.equal(JSON.stringify(pdfReport).includes('Renamed.pdf'), false);
-  await page.screenshot({ path: '.test/vault-pdf-0.0.5.png' });
+  await page.getByRole('button', { name: '荧光笔', exact: true }).click();
+  await page.getByLabel('粗细（只影响新笔迹）').selectOption('2');
+  const markerRect = await page.locator('.inkpdf-probe-ink').boundingBox();
+  await page.mouse.move(markerRect.x + 100, markerRect.y + 210); await page.mouse.down();
+  await page.mouse.move(markerRect.x + 260, markerRect.y + 210, { steps: 16 }); await page.mouse.up();
+  await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
+  const markerState = await viewState();
+  assert.equal(markerState.strokes.at(-1).kind, 'highlighter');
+  assert.equal(markerState.strokes.at(-1).color, '#f4d03f');
+  assert.equal(markerState.strokes.at(-1).size, 2);
+  const pixels = await page.evaluate(() => {
+    const c = document.querySelector('.inkpdf-probe-committed'), r = c.getBoundingClientRect();
+    return [120, 180, 240].map(x => c.getContext('2d').getImageData(Math.round(x*c.width/r.width), Math.round(210*c.height/r.height), 1, 1).data[3]);
+  });
+  assert.ok(pixels.every(a => a >= 75 && a <= 78), JSON.stringify(pixels));
+  await page.getByRole('button', { name: /^撤销/ }).click();
+  assert.equal((await viewState()).strokes.length, markerState.strokes.length - 1);
+  await page.getByRole('button', { name: /^重做/ }).click();
+  assert.deepEqual((await viewState()).strokes, markerState.strokes);
+  await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
+  await page.waitForTimeout(250);
+  await page.screenshot({path:'.test/style-before.png'});
+  const inkBefore = await page.locator('.inkpdf-probe-committed').evaluate(c => c.toDataURL());
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
+  assert.deepEqual((await viewState()).strokes, markerState.strokes);
+  await page.waitForTimeout(250);
+  await page.screenshot({path:'.test/style-after.png'});
+  const pixelDiff = await page.evaluate(async previous => {
+    const image = await createImageBitmap(await (await fetch(previous)).blob());
+    const c = document.querySelector('.inkpdf-probe-committed');
+    const prior = document.createElement('canvas'); prior.width = c.width; prior.height = c.height;
+    prior.getContext('2d').drawImage(image, 0, 0); image.close();
+    const a = prior.getContext('2d').getImageData(0,0,c.width,c.height).data;
+    const b = c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+    const bounds = data => {
+      let x0=c.width, y0=c.height, x1=0, y1=0;
+      for(let i=3;i<data.length;i+=4) if(data[i]>10) {
+        const n=(i-3)/4, x=n%c.width, y=Math.floor(n/c.width);
+        x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y);
+      }
+      return {x0,y0,x1,y1};
+    };
+    const r=c.getBoundingClientRect();
+    const alpha=[120,180,240].map(x=>b[(Math.round(210*c.height/r.height)*c.width+Math.round(x*c.width/r.width))*4+3]);
+    return {before:bounds(a),after:bounds(b),alpha};
+  }, inkBefore);
+  // Canvas rasterization can vary at edges; assert geometry and interior opacity, not PNG byte identity.
+  assert.deepEqual(pixelDiff.after, pixelDiff.before);
+  assert.ok(pixelDiff.alpha.every(a=>a>=75 && a<=78));
+  await page.getByLabel('颜色（只影响新笔迹）').selectOption('#d93025');
+  await page.getByLabel('粗细（只影响新笔迹）').selectOption('0.5');
+  const penRect = await page.locator('.inkpdf-probe-ink').boundingBox();
+  await page.mouse.move(penRect.x + 100, penRect.y + 260); await page.mouse.down();
+  await page.mouse.move(penRect.x + 220, penRect.y + 260); await page.mouse.up();
+  assert.equal((await viewState()).strokes.at(-1).color, '#d93025');
+  await page.getByRole('button', { name: /^撤销/ }).click();
+  await page.getByRole('button', { name: /^重做/ }).click();
+  await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
+  checks.push('Highlighter has uniform 30% alpha, undo/redo preserves styles, reload preserves geometry and interior opacity, new red thin pen does not restyle old ink');
+  await page.screenshot({ path: '.test/vault-pdf-0.0.6.png' });
   checks.push('Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1');
   assert.equal(failures.length, 0, failures.join('\n'));
-  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.5', status: 'PASS', browser: await browser.version(), checks,
+  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.6', status: 'PASS', browser: await browser.version(), checks,
     notRun: ['real Obsidian', 'iPad WKWebView', 'Apple Pencil', 'OCR', 'GitHub sync'] }, null, 2));
   console.log(checks.join('\n'));
 } finally {

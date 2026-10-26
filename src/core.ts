@@ -1,5 +1,5 @@
 export type Point = [number, number, number | null, number];
-export interface Stroke { id: string; pointerType: string; interrupted: boolean; points: Point[]; pressureGain?: number }
+export interface Stroke { id: string; pointerType: string; interrupted: boolean; points: Point[]; pressureGain?: number; kind?: 'pen' | 'highlighter'; color?: string; size?: number }
 export interface Snapshot {
   probeFormat: 1;
   runId: string;
@@ -27,6 +27,9 @@ export function parseSnapshot(raw: string, runId: string, sourceHash: string): S
         typeof s.interrupted !== 'boolean' || !Array.isArray(s.points) || !s.points.length ||
         s.points.length > LIMITS.pointsPerStroke) throw new Error('笔迹结构无效');
     ids.add(s.id);
+    if (s.kind !== undefined && s.kind !== 'pen' && s.kind !== 'highlighter') throw new Error('笔类型无效');
+    if (s.color !== undefined && (typeof s.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(s.color))) throw new Error('颜色无效');
+    if (s.size !== undefined && (!Number.isFinite(s.size) || s.size < 0.5 || s.size > 3)) throw new Error('笔画尺寸无效');
     if (s.pressureGain !== undefined && (!Number.isFinite(s.pressureGain) || s.pressureGain < 1 || s.pressureGain > 4)) throw new Error('压感增益无效');
     let lastTime = -1;
     for (const p of s.points) {
@@ -60,6 +63,9 @@ export const textHash = (text: string) => sha256(new TextEncoder().encode(text))
 export function penWidth(p: Point, gain = 1): number {
   return p[2] === null ? 1.8 : 0.8 + Math.min(1, Math.max(0, p[2] * gain)) * 3;
 }
+export function strokeWidth(s: Stroke, p: Point): number {
+  return (s.kind === 'highlighter' ? 12 : penWidth(p, s.pressureGain)) * (s.size ?? 1);
+}
 
 /** Capsule hit-test between consecutive eraser positions and stroke segments. */
 export function hitsStroke(stroke: Stroke, from: [number, number], to: [number, number], radius: number): boolean {
@@ -74,7 +80,7 @@ export function hitsStroke(stroke: Stroke, from: [number, number], to: [number, 
     const a = stroke.points[Math.max(0, i - 1)], b = stroke.points[i];
     const intersects = cross(from, to, a) * cross(from, to, b) < 0 && cross(a, b, from) * cross(a, b, to) < 0;
     const distance = Math.min(pointDistance(a, from, to), pointDistance(b, from, to), pointDistance(from, a, b), pointDistance(to, a, b));
-    if (intersects || distance <= radius + Math.max(penWidth(a, stroke.pressureGain), penWidth(b, stroke.pressureGain)) / 2) return true;
+    if (intersects || distance <= radius + Math.max(strokeWidth(stroke, a), strokeWidth(stroke, b)) / 2) return true;
   }
   return false;
 }
@@ -85,30 +91,32 @@ export interface ProbeFiles {
   create(path: string, text: string): Promise<void>;
 }
 
-// shortcut: erase history is session-only; persistent general undo belongs to a later stage.
-export class EraseHistory {
-  private entries: { stroke: Stroke; index: number }[][] = [];
-  get depth(): number { return this.entries.length; }
+// shortcut: history is bounded and session-only; persisted undo is outside this stage.
+export class EditHistory {
+  private past: { before: Stroke[]; after: Stroke[] }[] = [];
+  private future: { before: Stroke[]; after: Stroke[] }[] = [];
+  get undoDepth(): number { return this.past.length; }
+  get redoDepth(): number { return this.future.length; }
   record(before: Stroke[], after: Stroke[]): void {
-    const remaining = new Set(after.map(s => s.id));
-    const removed = before.flatMap((stroke, index) => remaining.has(stroke.id) ? [] : [{ stroke, index }]);
-    if (!removed.length) return;
-    this.entries.push(removed);
-    while (this.entries.length > 20 || this.entries.reduce((n, entry) => n + entry.reduce((m, item) => m + item.stroke.points.length, 0), 0) > LIMITS.totalPoints) this.entries.shift();
+    this.past.push({ before: before.slice(), after: after.slice() });
+    this.future = [];
+    while (this.past.length > 20 || this.retainedPoints() > 200000) this.past.shift();
   }
-  restore(current: Stroke[]): Stroke[] {
-    const entry = this.entries.at(-1);
-    if (!entry) return current;
-    const restored = current.slice();
-    for (const { stroke, index } of entry) {
-      if (!restored.some(s => s.id === stroke.id)) restored.splice(index, 0, stroke);
-    }
-    if (restored.length > LIMITS.strokes || restored.reduce((n, s) => n + s.points.length, 0) > LIMITS.totalPoints) throw new Error('恢复会超过探针上限；历史保留，请先擦除其他笔迹');
-    this.entries.pop();
-    return restored;
+  private retainedPoints(): number {
+    const strokes = new Set(this.past.flatMap(e => [...e.before, ...e.after]));
+    return [...strokes].reduce((n, s) => n + s.points.length, 0);
+  }
+  undo(current: Stroke[]): Stroke[] {
+    const e = this.past.pop();
+    if (!e) return current;
+    this.future.push(e); return e.before.slice();
+  }
+  redo(current: Stroke[]): Stroke[] {
+    const e = this.future.pop();
+    if (!e) return current;
+    this.past.push(e); return e.after.slice();
   }
 }
-
 // shortcut: cumulative immutable snapshots cost space; replace after T3 fault-tested journal exists.
 export class ProbeStore {
   revision = 0;
