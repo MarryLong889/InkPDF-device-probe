@@ -1,5 +1,6 @@
 import { ItemView, Notice, Plugin, WorkspaceLeaf, loadPdfJs, apiVersion, FuzzySuggestModal, TFile } from 'obsidian';
 import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, strokeWidth, hitsStroke, EditHistory } from './core';
+import { fitShape } from './shapes';
 import { workerProbe } from './capabilities';
 import { PDF_BASE64 } from './generated/fixture';
 
@@ -64,16 +65,45 @@ export default class InkPDFProbe extends Plugin {
   }
 }
 
+class PageState {
+  loading?: Promise<void>;
+  rendered = false;
+  constructor(public number: number) {}
+  runId: string = '';
+  store: ProbeStore | undefined = undefined;
+  strokes: Stroke[] = [];
+  savedCount: number = 0;
+  editVersion: number = 0;
+  savedEditVersion: number = 0;
+  history: EditHistory = new EditHistory();
+  totalPoints: number = 0;
+  saveTimer: number | undefined = undefined;
+  saveDue: number = 0;
+  page: PdfPage | undefined = undefined;
+  viewport: Viewport | undefined = undefined;
+  renderTask: RenderTask | undefined = undefined;
+  renderGeneration: number = 0;
+  ready: boolean = false;
+  dpr: number = 1;
+  saveTask: Promise<void> | undefined = undefined;
+  saveError: string = '';
+  sheet: HTMLElement = undefined!;
+  pdfCanvas: HTMLCanvasElement = undefined!;
+  ink: HTMLCanvasElement = undefined!;
+  committedInk: HTMLCanvasElement = undefined!;
+}
+
 class ProbeView extends ItemView {
-  private runId = '';
-  private store?: ProbeStore;
-  private strokes: Stroke[] = [];
-  private savedCount = 0;
-  private editVersion = 0;
-  private savedEditVersion = 0;
+  private pages = new Map<number, PageState>();
+  private current = new PageState(1);
+  private refreshTask?: Promise<void>;
+  private sourceHash = '';
+  private shapeTimer?: number;
+  private shapeAnchor?: [number, number];
+  private fitted?: ReturnType<typeof fitShape>;
+  private shapeCounts: Record<string, number> = {};
   private active?: { pointerId: number; started: number; stroke: Stroke };
   private erasing?: { pointerId: number; before: Stroke[]; last: [number, number]; changed: boolean };
-  private history = new EditHistory();
   private undoButton!: HTMLButtonElement;
   private redoButton!: HTMLButtonElement;
   private tool: 'pen' | 'eraser' | 'highlighter' = 'pen';
@@ -90,32 +120,17 @@ class ProbeView extends ItemView {
   private pan?: { id: number; x: number; y: number; moving: boolean };
   private lastPenAt = -Infinity;
   private touchDiagnostics = { moves: 0, blockedPen: 0, blockedMulti: 0, cooldownMoves: 0, maxContact: 0, scrollChanges: 0 };
-  private totalPoints = 0;
   private frame = 0;
   private paintedPoints = 0;
-  private saveTimer?: number;
-  private saveDue = 0;
   private renderedWidth = 0;
   private pdf?: PdfDocument;
   private pdfTask?: { promise: Promise<PdfDocument>; destroy(): Promise<void> };
-  private page?: PdfPage;
-  private viewport?: Viewport;
-  private renderTask?: RenderTask;
-  private renderGeneration = 0;
   private closed = false;
-  private ready = false;
   private mode: 'write' | 'browse' = 'write';
   private zoom = 1;
-  private dpr = 1;
-  private saveTask?: Promise<void>;
-  private saveError = '';
   private status!: HTMLElement;
   private capability!: HTMLElement;
   private scroll!: HTMLElement;
-  private sheet!: HTMLElement;
-  private pdfCanvas!: HTMLCanvasElement;
-  private ink!: HTMLCanvasElement;
-  private committedInk!: HTMLCanvasElement;
   private inputStatus!: HTMLElement;
   private timings = { paints: 0, maxPaintMs: 0, saves: 0, maxSaveMs: 0, maxEventGapMs: 0 };
   private endings: { reason: string; samples: number; durationMs: number }[] = [];
@@ -128,23 +143,23 @@ class ProbeView extends ItemView {
   private readonly pdfPath: string | null;
   constructor(leaf: WorkspaceLeaf, private plugin: InkPDFProbe) { super(leaf); this.pdfPath = plugin.lastPdfPath; this.pageNumber = this.pdfPath ? plugin.lastPage : 1; }
   async prepareNavigation(): Promise<void> {
-    // shortcut: paging reopens one view/PDF at a time; cache pages only after device profiling.
     this.navigating = true;
     try { await this.flush(); }
     catch (e) { this.navigating = false; throw e; }
   }
   toggleTool(): void {
-    if (!this.ready || this.navigating) return;
+    if (!this.current.ready || this.navigating) return;
     this.finish('tool-change');
     this.tool = this.tool === 'pen' ? 'eraser' : 'pen';
-    this.toolButton.textContent = this.tool === 'pen' ? '工具：钢笔' : '工具：整笔橡皮';
+    this.toolButton.textContent = this.tool === 'pen' ? '钢笔' : '橡皮';
+    this.toolButton.setAttribute('aria-label', this.tool === 'pen' ? '工具：钢笔' : '工具：整笔橡皮');
   }
   getViewType(): string { return VIEW; }
   getDisplayText(): string { return 'InkPDF 设备探针'; }
   getIcon(): string { return 'pen-tool'; }
 
   private button(parent: HTMLElement, text: string, fn: () => Promise<void> | void): HTMLButtonElement {
-    const b = parent.createEl('button', { text });
+    const b = parent.createEl('button', { text, attr: { 'aria-label': text, title: text } });
     b.addEventListener('click', () => { void Promise.resolve().then(fn).catch(e => this.fail(e)); });
     return b;
   }
@@ -156,10 +171,11 @@ class ProbeView extends ItemView {
     new Notice(`InkPDF：${message}`, 8000);
   }
   private state(): void {
-    if (!this.ready) return;
-    const suffix = this.active || this.erasing ? '操作中，抬笔后保存' : this.saveError ? `保存失败：${this.saveError}` : this.savedEditVersion === this.editVersion ?
-      `已保存并读回校验 · revision ${this.store?.revision ?? 0}` : '尚有未保存笔迹';
-    this.status.textContent = `${this.strokes.length} 笔 / ${LIMITS.strokes} · ${suffix}`;
+    if (!this.current.ready) return;
+    const suffix = this.active || this.erasing ? '操作中，抬笔后保存' : this.current.saveError ? `保存失败：${this.current.saveError}` : this.current.savedEditVersion === this.current.editVersion ?
+      `已保存并读回校验 · revision ${this.current.store?.revision ?? 0}` : '尚有未保存笔迹';
+    const other = [...this.pages.values()].filter(p => p !== this.current && (p.saveError || p.editVersion !== p.savedEditVersion));
+    this.status.textContent = `${other.length ? `另 ${other.length} 页未保存 / 失败 · ` : ''}${this.current.strokes.length} 笔 / ${LIMITS.strokes} · ${suffix}`;
   }
   private async folder(path: string): Promise<void> {
     if (!await this.app.vault.adapter.exists(path)) {
@@ -170,28 +186,31 @@ class ProbeView extends ItemView {
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass('inkpdf-probe');
-    this.contentEl.createEl('h2', { text: 'InkPDF · 最小设备探针' });
-    this.contentEl.createEl('p', { text: '逐页 PDF 书写测试。请先关闭 iPad 随手写 / Scribble。笔抬起后可单指滚动；笔落下时暂停手指导航。书写和擦除支持撤销/重做，最多保留 20 步（当前页打开期间）。笔体双击暂不可用，请用工具按钮切换。' });
     const controls = this.contentEl.createDiv({ cls: 'inkpdf-probe-controls' });
-    this.button(controls, '打开仓库 PDF', () => this.plugin.choosePdf());
-    const sourceLabel = this.contentEl.createDiv({ cls: 'inkpdf-probe-source' });
+    this.button(controls, '打开仓库 PDF', () => this.plugin.choosePdf()).textContent = '打开';
+    const more = this.contentEl.createEl('details', { cls: 'inkpdf-probe-more' });
+    more.createEl('summary', { text: '更多 · 设置与诊断' });
+    more.createEl('p', { text: '关闭 iPad 随手写 / Scribble。单指连续滚动；钢笔画完保持接触 1 秒可拟合直线、正放方框或圆。撤销一次恢复原手绘，再撤销删除。原 PDF 只读。笔体双击暂不支持。' });
+    const options = more.createDiv({ cls: 'inkpdf-probe-options' });
+    const sourceLabel = more.createDiv({ cls: 'inkpdf-probe-source' });
     sourceLabel.textContent = this.pdfPath ? `${this.pdfPath} · 原文件只读；相同内容副本共享逐页笔迹` : '合成 PDF 设备测试';
-    this.prevButton = this.button(controls, '上一页', () => this.ready && this.pdfPath && this.pageNumber > 1 ? this.plugin.open(true, this.pdfPath, this.pageNumber - 1) : undefined);
+    this.prevButton = this.button(options, '上一页', () => this.jump(this.pageNumber - 1));
     this.pageLabel = controls.createEl('span', { text: '加载页码中…', attr: { role: 'status' } });
-    this.nextButton = this.button(controls, '下一页', () => this.ready && this.pdfPath && this.pdf && this.pageNumber < this.pdf.numPages ? this.plugin.open(true, this.pdfPath, this.pageNumber + 1) : undefined);
+    this.nextButton = this.button(options, '下一页', () => this.jump(this.pageNumber + 1));
     this.prevButton.disabled = this.nextButton.disabled = true;
-    const modeButton = this.button(controls, '模式：书写', () => {
+    const modeButton = this.button(options, '模式：书写', () => {
       this.finish('mode-change');
       this.pan = undefined;
       this.mode = this.mode === 'write' ? 'browse' : 'write';
       modeButton.textContent = this.mode === 'write' ? '模式：书写' : '模式：浏览';
-      this.ink.style.touchAction = this.mode === 'write' ? 'none' : 'pan-x pan-y';
-      this.scroll.style.touchAction = this.ink.style.touchAction;
+      for (const p of this.pages.values()) p.ink.style.touchAction = this.mode === 'write' ? 'none' : 'pan-x pan-y';
+      this.scroll.style.touchAction = this.mode === 'write' ? 'none' : 'pan-x pan-y';
     });
     this.toolButton = this.button(controls, '工具：钢笔', () => this.toggleTool());
+    this.toolButton.textContent = '钢笔';
     this.button(controls, '荧光笔', () => {
-      if (!this.ready || this.navigating) return;
-      this.finish('tool-change'); this.tool = 'highlighter'; this.toolButton.textContent = '工具：荧光笔';
+      if (!this.current.ready || this.navigating) return;
+      this.finish('tool-change'); this.tool = 'highlighter'; this.toolButton.textContent = '荧光'; this.toolButton.setAttribute('aria-label', '工具：荧光笔');
       this.color = '#f4d03f'; color.value = this.color;
     });
     const colorLabel = controls.createEl('label', { cls: 'inkpdf-probe-gain', text: '颜色 ' });
@@ -206,47 +225,55 @@ class ProbeView extends ItemView {
     this.undoButton = this.button(controls, '撤销（0）', () => this.undoRedo(false));
     this.redoButton = this.button(controls, '重做（0）', () => this.undoRedo(true));
     this.updateHistory();
-    const gainLabel = controls.createEl('label', { cls: 'inkpdf-probe-gain', text: '压感增益 ' });
+    const gainLabel = options.createEl('label', { cls: 'inkpdf-probe-gain', text: '压感增益 ' });
     const gain = gainLabel.createEl('select', { attr: { 'aria-label': '压感增益（只影响新笔迹）' } });
     for (const n of [1, 2.5, 4]) gain.createEl('option', { text: `${n}×`, attr: { value: String(n) } });
     gain.value = '2.5';
     gain.addEventListener('change', () => { this.finish('pressure-change'); this.pressureGain = Number(gain.value); });
-    for (const zoom of [1, 1.5, 2]) this.button(controls, `${zoom * 100}%`, async () => {
-      this.finish('zoom'); this.zoom = zoom; await this.render();
+    for (const zoom of [1, 1.5, 2]) this.button(options, `${zoom * 100}%`, async () => {
+      this.finish('zoom'); this.zoom = zoom; await this.resizePages();
     });
-    this.button(controls, '保存 / 重试', () => this.flush());
-    this.button(controls, '保存并重新读取', async () => {
+    this.button(options, '保存 / 重试', () => this.flush());
+    this.button(options, '保存并重新读取', async () => {
+      const p = this.current;
+      this.navigating = true;
+      try {
       await this.flush();
-      if (!this.store) throw new Error('存储尚未初始化');
-      const loaded = await this.store.load();
-      if (JSON.stringify(loaded) !== JSON.stringify(this.strokes)) {
-        this.ready = false;
+      if (!p.store) throw new Error('存储尚未初始化');
+      const loaded = await p.store.load();
+      if (JSON.stringify(loaded) !== JSON.stringify(p.strokes)) {
+        p.ready = false;
         throw new Error('重读数据不同，停止编辑');
       }
-      this.strokes = loaded; this.savedCount = loaded.length;
-      this.totalPoints = loaded.reduce((n, s) => n + s.points.length, 0);
-      this.report.reopenReadback = { status: 'PASS', strokeCount: loaded.length, revision: this.store.revision };
-      this.redraw(); this.state();
+      p.strokes = loaded; p.savedCount = loaded.length;
+      p.totalPoints = loaded.reduce((n, s) => n + s.points.length, 0);
+      this.report.reopenReadback = { status: 'PASS', strokeCount: loaded.length, revision: p.store.revision };
+      this.redraw(p); this.state();
       new Notice(`InkPDF：已从磁盘重新读取 ${loaded.length} 笔`);
+      } finally { this.navigating = false; }
     });
-    this.button(controls, '复测 Worker', () => this.probeWorker());
-    this.button(controls, '导出诊断', () => this.exportReport());
+    this.button(options, '复测 Worker', () => this.probeWorker());
+    this.button(options, '导出诊断', () => this.exportReport());
     this.status = this.contentEl.createDiv({ cls: 'inkpdf-probe-status', attr: { role: 'status', 'aria-live': 'polite' }, text: '初始化中…' });
-    this.capability = this.contentEl.createDiv({ cls: 'inkpdf-probe-capability', text: 'Worker 检测中…' });
-    this.inputStatus = this.contentEl.createDiv({ cls: 'inkpdf-probe-capability', text: '笔压力：尚无采样。Scribble 状态需在系统设置中确认。' });
+    this.capability = more.createDiv({ cls: 'inkpdf-probe-capability', text: 'Worker 检测中…' });
+    this.inputStatus = more.createDiv({ cls: 'inkpdf-probe-capability', text: '笔压力：尚无采样。Scribble 状态需在系统设置中确认。' });
     this.scroll = this.contentEl.createDiv({ cls: 'inkpdf-probe-scroll' });
     this.scroll.style.touchAction = 'none';
-    this.sheet = this.scroll.createDiv({ cls: 'inkpdf-probe-sheet' });
-    this.pdfCanvas = this.sheet.createEl('canvas');
-    this.committedInk = this.sheet.createEl('canvas', { cls: 'inkpdf-probe-committed' });
-    this.ink = this.sheet.createEl('canvas', { cls: 'inkpdf-probe-ink', attr: { 'aria-label': 'PDF 手写测试画布' } });
-    this.ink.style.touchAction = 'none';
-    this.registerDomEvent(this.scroll, 'pointerdown', e => { if (e.pointerType === 'touch' || e.target === this.ink) this.down(e); });
+    this.registerDomEvent(this.scroll, 'pointerdown', e => {
+      if (e.pointerType !== 'touch') {
+        const target = [...this.pages.values()].find(p => p.ink === e.target);
+        if (!target?.ready || !target.rendered || this.active || this.erasing) return;
+        this.activate(target);
+      }
+      this.down(e);
+    });
+    this.registerDomEvent(this.scroll, 'scroll', () => { void this.refreshPages().catch(e => this.fail(e)); });
     this.registerDomEvent(document, 'pointermove', e => this.move(e));
     this.registerDomEvent(document, 'pointerup', e => {
       this.endTouch(e);
       if (e.pointerId === this.erasing?.pointerId) { this.eraseAt(e); this.finish('pointerup'); return; }
       if (e.pointerId !== this.active?.pointerId) return;
+      if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) >= 4) this.fitted = undefined;
       this.sample(e, true);
       this.finish('pointerup');
     });
@@ -254,7 +281,7 @@ class ProbeView extends ItemView {
       this.endTouch(e);
       if (e.pointerId === this.active?.pointerId || e.pointerId === this.erasing?.pointerId) { this.pointerStats.canceled++; this.finish('pointercancel'); }
     });
-    this.registerDomEvent(this.ink, 'lostpointercapture', e => {
+    this.registerDomEvent(this.scroll, 'lostpointercapture', e => {
       if (e.pointerId === this.active?.pointerId || e.pointerId === this.erasing?.pointerId) this.pointerStats.lostCapture++;
       // Document-level move/up handlers continue the same stroke after capture loss.
     });
@@ -267,12 +294,12 @@ class ProbeView extends ItemView {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         if (Math.abs(this.scroll.clientWidth - this.renderedWidth) < 1) return;
-        this.finish('resize-width'); void this.render().catch(e => this.fail(e));
+        this.finish('resize-width'); void this.resizePages().catch(e => this.fail(e));
       }, 150);
     });
     observer.observe(this.scroll);
     this.register(() => { observer.disconnect(); window.clearTimeout(resizeTimer); });
-    this.register(() => { cancelAnimationFrame(this.frame); window.clearTimeout(this.saveTimer); });
+    this.register(() => { cancelAnimationFrame(this.frame); window.clearTimeout(this.current.saveTimer); });
     this.report = { probeVersion: this.plugin.manifest.version, obsidianApiVersion: apiVersion,
       userAgent: navigator.userAgent, devicePixelRatio, secureContext: isSecureContext,
       pointerEvents: typeof PointerEvent !== 'undefined', coalescedEvents: typeof PointerEvent !== 'undefined' && 'getCoalescedEvents' in PointerEvent.prototype,
@@ -282,7 +309,7 @@ class ProbeView extends ItemView {
       manualResults: { pencil: 'NOT RUN', pressureVariation: 'NOT RUN', palmRejection: 'NOT RUN', appRestart: 'NOT RUN', backgroundKill: 'NOT RUN' } };
     void this.probeWorker();
     try { await this.initialize(); }
-    catch (e) { this.ready = false; if (!this.closed) this.fail(e); }
+    catch (e) { this.current.ready = false; if (!this.closed) this.fail(e); }
   }
 
   private async initialize(): Promise<void> {
@@ -312,83 +339,178 @@ class ProbeView extends ItemView {
     if (this.closed) return;
     if (!this.pdfPath && this.pdf.numPages !== 1) throw new Error('测试夹具应当只有一页');
     this.pageNumber = Math.min(this.pageNumber, this.pdf.numPages);
-    this.runId = this.pdfPath ? `pdf-${sourceHash}-p${this.pageNumber}` : this.plugin.lastRun;
-    const dir = `${ROOT}/${this.runId}`;
-    for (const p of [ROOT, dir, `${dir}/snapshots`]) await this.folder(p);
-    if (!this.pdfPath) {
-      const pdfPath = `${dir}/probe.pdf`;
-      if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
-      const diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
-      if (await sha256(diskBytes) !== sourceHash) throw new Error('测试 PDF 已改变，拒绝覆盖或叠加');
+    this.sourceHash = sourceHash;
+    await this.folder(ROOT);
+    // Resolve dimensions before scrolling so mixed page sizes cannot shift ink targets.
+    for (let n = 1; n <= this.pdf.numPages; n++) {
+      if (this.closed) return;
+      const p = new PageState(n);
+      p.page = await this.pdf.getPage(n);
+      p.sheet = this.scroll.createDiv({ cls: 'inkpdf-probe-sheet', attr: { 'data-page': String(n), 'aria-label': `第 ${n} 页` } });
+      p.pdfCanvas = p.sheet.createEl('canvas');
+      p.committedInk = p.sheet.createEl('canvas', { cls: 'inkpdf-probe-committed' });
+      p.ink = p.sheet.createEl('canvas', { cls: 'inkpdf-probe-ink', attr: { 'aria-label': `第 ${n} 页手写画布` } });
+      p.ink.style.touchAction = 'none';
+      p.runId = this.pdfPath ? `pdf-${sourceHash}-p${n}` : this.plugin.lastRun!;
+      this.pages.set(n, p); this.layout(p);
     }
-    this.store = new ProbeStore({
-      list: async () => {
-        const { files } = await this.app.vault.adapter.list(`${dir}/snapshots`);
-        return files.filter(f => f.endsWith('.json')).map(f => f.slice(f.lastIndexOf('/') + 1));
-      },
-      read: path => this.app.vault.adapter.read(`${dir}/snapshots/${path}`),
-      create: async (path, text) => { await this.app.vault.create(`${dir}/snapshots/${path}`, text); }
-    }, this.runId, sourceHash);
-    this.strokes = await this.store.load();
-    this.savedCount = this.strokes.length;
-    this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
-    this.report.loadedFromDisk = { strokeCount: this.savedCount, revision: this.store.revision };
-    this.report.sourceHash = sourceHash;
-    this.page = await this.pdf.getPage(this.pageNumber);
-    await this.render();
-    if (this.closed) return;
+    if (!this.pdfPath) {
+      const dir = `${ROOT}/${this.pages.get(1)!.runId}`;
+      await this.folder(dir);
+      const path = `${dir}/probe.pdf`;
+      if (!await this.app.vault.adapter.exists(path)) await this.app.vault.createBinary(path, bytes.slice().buffer);
+      if (await sha256(new Uint8Array(await this.app.vault.adapter.readBinary(path))) !== sourceHash) throw new Error('测试 PDF 已改变，拒绝覆盖或叠加');
+    }
+    this.current = this.pages.get(this.pageNumber)!;
+    await this.loadPage(this.current);
     this.report.pdf = { status: 'PASS', elapsedMs: Math.round(performance.now() - started), pages: this.pdf.numPages, selectedPage: this.pageNumber, sourceReadOnly: true };
-    this.pageLabel.textContent = `第 ${this.pageNumber} / ${this.pdf.numPages} 页`;
-    this.prevButton.disabled = !this.pdfPath || this.pageNumber === 1;
-    this.nextButton.disabled = !this.pdfPath || this.pageNumber === this.pdf.numPages;
-    this.plugin.lastPage = this.pageNumber;
-    await this.plugin.remember();
-    this.ready = true;
-    this.state();
+    this.scroll.scrollTop += this.current.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top - 12;
+    this.activate(this.current);
+    await this.refreshPages();
+  }
+  private layout(p: PageState): void {
+    const base = p.page!.getViewport({ scale: 1 });
+    const scale = Math.max(.2, Math.min(1.2, (this.scroll.clientWidth - 24) / base.width)) * this.zoom;
+    p.viewport = p.page!.getViewport({ scale });
+    p.sheet.style.width = `${p.viewport.width}px`;
+    p.sheet.style.height = `${p.viewport.height}px`;
+    this.renderedWidth = this.scroll.clientWidth;
+  }
+  private loadPage(p: PageState): Promise<void> {
+    if (p.loading) return p.loading;
+    p.loading = (async () => {
+      if (!p.store) {
+        const dir = `${ROOT}/${p.runId}`;
+        for (const path of [dir, `${dir}/snapshots`]) await this.folder(path);
+        p.store = new ProbeStore({
+          list: async () => (await this.app.vault.adapter.list(`${dir}/snapshots`)).files.filter(f => f.endsWith('.json')).map(f => f.slice(f.lastIndexOf('/') + 1)),
+          read: path => this.app.vault.adapter.read(`${dir}/snapshots/${path}`),
+          create: async (path, text) => { await this.app.vault.create(`${dir}/snapshots/${path}`, text); }
+        }, p.runId, this.sourceHash);
+        try { p.strokes = await p.store.load(); }
+        catch (e) { p.store = undefined; throw e; }
+        p.savedCount = p.strokes.length;
+        p.totalPoints = p.strokes.reduce((n, s) => n + s.points.length, 0);
+      }
+      if (!p.rendered) await this.render(p);
+      p.ready = true; p.sheet.dataset.loaded = 'true';
+    })().finally(() => { p.loading = undefined; });
+    return p.loading;
+  }
+  private activate(p: PageState): void {
+    if (!p.ready || this.active || this.erasing || this.closed) return;
+    this.current.ink?.removeAttribute('data-active');
+    this.current.committedInk?.removeAttribute('data-active');
+    this.current = p; this.pageNumber = p.number;
+    p.ink.setAttribute('data-active', 'true'); p.committedInk.setAttribute('data-active', 'true');
+    this.pageLabel.textContent = `第 ${p.number} / ${this.pdf!.numPages} 页`;
+    this.prevButton.disabled = p.number === 1; this.nextButton.disabled = p.number === this.pdf!.numPages;
+    this.report.pdf = { ...this.report.pdf as object, selectedPage: p.number };
+    this.report.sourceHash = this.sourceHash;
+    this.report.loadedFromDisk = { strokeCount: p.savedCount, revision: p.store?.revision };
+    if (this.plugin.lastPage !== p.number) {
+      this.plugin.lastPage = p.number;
+      void this.plugin.remember().catch(e => this.fail(e));
+    }
+    this.updateHistory(); this.state();
+  }
+  private visiblePage(): PageState {
+    const mid = this.scroll.getBoundingClientRect().top + Math.min(this.scroll.clientHeight / 2, 250);
+    return [...this.pages.values()].reduce((best, p) => {
+      const distance = (q: PageState) => { const r = q.sheet.getBoundingClientRect(); return Math.max(r.top - mid, mid - r.bottom, 0); };
+      return distance(p) < distance(best) ? p : best;
+    }, this.current);
+  }
+  private refreshPages(): Promise<void> {
+    if (this.refreshTask) return this.refreshTask;
+    this.refreshTask = (async () => {
+      if (!this.pages.size || !this.report.pdf || this.closed) return;
+      let target: PageState;
+      do {
+        target = this.visiblePage();
+        await this.loadPage(target);
+        this.activate(target);
+        for (const p of this.pages.values()) {
+          if (Math.abs(p.number - target.number) > 1 && p !== this.current && p.rendered) {
+            p.rendered = false; p.sheet.dataset.loaded = 'false';
+            for (const c of [p.pdfCanvas, p.ink, p.committedInk]) { c.width = 0; c.height = 0; }
+            p.page?.cleanup();
+            if (!this.navigating && !p.saveTask && !p.saveError && p.editVersion === p.savedEditVersion) {
+              p.store = undefined; p.strokes = []; p.history = new EditHistory(); p.ready = false;
+            }
+          }
+        }
+        for (const n of [target.number - 1, target.number + 1]) {
+          const p = this.pages.get(n);
+          if (p && !this.closed) await this.loadPage(p);
+        }
+      } while (!this.closed && target !== this.visiblePage());
+    })().finally(() => { this.refreshTask = undefined; });
+    return this.refreshTask;
+  }
+  private async jump(n: number): Promise<void> {
+    const p = this.pages.get(n);
+    if (!p) return;
+    await this.flush();
+    await this.loadPage(p);
+    this.activate(p);
+    this.scroll.scrollTop += p.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top - 12;
+    await this.refreshPages();
+  }
+  private async resizePages(): Promise<void> {
+    await this.refreshTask;
+    if (!this.pages.size || !this.report.pdf || this.closed) return;
+    const offset = this.current.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top;
+    for (const p of this.pages.values()) {
+      this.layout(p); p.rendered = false; p.sheet.dataset.loaded = 'false';
+      for (const c of [p.pdfCanvas, p.ink, p.committedInk]) { c.width = 0; c.height = 0; }
+    }
+    this.scroll.scrollTop += this.current.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top - offset;
+    await this.refreshPages();
   }
   private async probeWorker(): Promise<void> {
     const result = await workerProbe();
     this.report.worker = result;
     if (!this.closed) this.capability.textContent = `Blob module Worker + 基础 WASM：${result.status}（不代表 ORT/SIMD 或 OCR 已通过）`;
   }
-  private async render(): Promise<void> {
-    if (!this.page || this.closed) return;
-    const generation = ++this.renderGeneration;
-    const previous = this.renderTask;
+  private async render(p = this.current): Promise<void> {
+    if (!p.page || this.closed) return;
+    const generation = ++p.renderGeneration;
+    const previous = p.renderTask;
     previous?.cancel();
     await previous?.promise.catch(() => undefined);
-    if (generation !== this.renderGeneration || this.closed) return;
-    const base = this.page.getViewport({ scale: 1 });
+    if (generation !== p.renderGeneration || this.closed) return;
+    const base = p.page.getViewport({ scale: 1 });
     this.renderedWidth = this.scroll.clientWidth;
     const scale = Math.max(0.2, Math.min(1.2, (this.scroll.clientWidth - 24) / base.width)) * this.zoom;
-    const viewport = this.page.getViewport({ scale });
+    const viewport = p.page.getViewport({ scale });
     pdfPoint(viewport.transform, 0, 0);
-    this.viewport = viewport;
-    this.dpr = Math.min(devicePixelRatio || 1, 2, 4096 / Math.max(viewport.width, viewport.height));
-    this.sheet.style.width = `${viewport.width}px`;
-    this.sheet.style.height = `${viewport.height}px`;
-    for (const canvas of [this.pdfCanvas, this.committedInk, this.ink]) {
-      canvas.width = Math.ceil(viewport.width * this.dpr);
-      canvas.height = Math.ceil(viewport.height * this.dpr);
+    p.viewport = viewport;
+    p.dpr = Math.min(devicePixelRatio || 1, 2, 4096 / Math.max(viewport.width, viewport.height));
+    p.sheet.style.width = `${viewport.width}px`;
+    p.sheet.style.height = `${viewport.height}px`;
+    for (const canvas of [p.pdfCanvas, p.committedInk, p.ink]) {
+      canvas.width = Math.ceil(viewport.width * p.dpr);
+      canvas.height = Math.ceil(viewport.height * p.dpr);
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
     }
-    const context = this.pdfCanvas.getContext('2d');
+    const context = p.pdfCanvas.getContext('2d');
     if (!context) throw new Error('Canvas 2D unavailable');
-    const task = this.page.render({ canvas: this.pdfCanvas, canvasContext: context, viewport,
-      transform: [this.dpr, 0, 0, this.dpr, 0, 0] });
-    this.renderTask = task;
+    const task = p.page.render({ canvas: p.pdfCanvas, canvasContext: context, viewport,
+      transform: [p.dpr, 0, 0, p.dpr, 0, 0] });
+    p.renderTask = task;
     try { await task.promise; }
-    catch (e) { if (generation === this.renderGeneration && !this.closed) throw e; }
-    if (generation === this.renderGeneration && !this.closed) this.redraw();
+    catch (e) { if (generation === p.renderGeneration && !this.closed) throw e; }
+    if (generation === p.renderGeneration && !this.closed) { p.rendered = true; this.redraw(p); }
   }
-  private context(canvas: HTMLCanvasElement, clear = false): CanvasRenderingContext2D | null {
-    if (!this.viewport) return null;
+  private context(canvas: HTMLCanvasElement, clear = false, p = this.current): CanvasRenderingContext2D | null {
+    if (!p.viewport) return null;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const [a, b, c, d, e, f] = this.viewport.transform.map(n => n * this.dpr);
+    const [a, b, c, d, e, f] = p.viewport.transform.map(n => n * p.dpr);
     ctx.setTransform(a, b, c, d, e, f);
     ctx.strokeStyle = '#155ac4'; ctx.fillStyle = '#155ac4'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     return ctx;
@@ -422,19 +544,20 @@ class ProbeView extends ItemView {
       }
       ctx.restore();
   }
-  private redraw(): void {
-    const ctx = this.context(this.committedInk, true);
-    if (ctx) for (const s of this.strokes) this.drawStroke(ctx, s);
-    this.context(this.ink, true);
+  private redraw(p = this.current): void {
+    const ctx = this.context(p.committedInk, true, p);
+    if (ctx) for (const s of p.strokes) this.drawStroke(ctx, s);
+    this.context(p.ink, true, p);
+    if (p !== this.current) return;
     this.paintedPoints = 0;
     this.paintActive();
   }
   private paintActive(): void {
     const started = performance.now();
     // A translucent stroke is painted once as a whole path to avoid dark segment joins.
-    const ctx = this.context(this.ink, this.active?.stroke.kind === 'highlighter');
+    const ctx = this.context(this.current.ink, !!this.fitted || this.active?.stroke.kind === 'highlighter');
     if (ctx && this.active) {
-      this.drawStroke(ctx, this.active.stroke, this.paintedPoints);
+      this.drawStroke(ctx, this.fitted ? { ...this.active.stroke, points: this.fitted.points } : this.active.stroke, this.fitted ? 0 : this.paintedPoints);
       this.paintedPoints = this.active.stroke.points.length;
       const p = this.active.stroke.points.at(-1)?.[2];
       this.inputStatus.textContent = `当前原始压力 ${p?.toFixed(3) ?? '无'} · 本次范围 ${this.pointerStats.pressureMin?.toFixed(3) ?? '-'}～${this.pointerStats.pressureMax?.toFixed(3) ?? '-'} · 增益 ${this.pressureGain}×`;
@@ -459,12 +582,12 @@ class ProbeView extends ItemView {
         this.pan = undefined; this.pointerStats.ignoredTouches++; return;
       }
       this.pan = { id: e.pointerId, x: e.clientX, y: e.clientY, moving: false };
-      try { this.ink.setPointerCapture(e.pointerId); } catch { this.pointerStats.captureFailed++; }
+      try { this.current.ink.setPointerCapture(e.pointerId); } catch { this.pointerStats.captureFailed++; }
       return;
     }
-    if (!this.ready || this.navigating || !this.viewport || this.mode !== 'write' || !['pen', 'mouse'].includes(e.pointerType) || e.button !== 0) return;
+    if (!this.current.ready || this.navigating || !this.current.viewport || this.mode !== 'write' || !['pen', 'mouse'].includes(e.pointerType) || e.button !== 0) return;
     if (this.active || this.erasing) this.finish('superseded-down');
-    if (this.tool !== 'eraser' && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
+    if (this.tool !== 'eraser' && (this.current.strokes.length >= LIMITS.strokes || this.current.totalPoints >= LIMITS.totalPoints)) {
       new Notice('已达探针上限，请导出诊断后新建独立测试'); return;
     }
     e.preventDefault();
@@ -472,44 +595,44 @@ class ProbeView extends ItemView {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     this.lastPenAt = performance.now();
     if (e.pointerType === 'pen') this.pointerStats.penDown++; else this.pointerStats.mouseDown++;
-    try { this.ink.setPointerCapture(e.pointerId); } catch { this.pointerStats.captureFailed++; }
+    try { this.current.ink.setPointerCapture(e.pointerId); } catch { this.pointerStats.captureFailed++; }
     if (this.tool === 'eraser') {
-      this.erasing = { pointerId: e.pointerId, before: this.strokes.slice(), last: this.eventPoint(e), changed: false };
+      this.erasing = { pointerId: e.pointerId, before: this.current.strokes.slice(), last: this.eventPoint(e), changed: false };
       this.eraseAt(e); this.state(); return;
     }
     this.paintedPoints = 0;
     this.lastSampleTime = e.timeStamp;
     this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain, kind: this.tool, color: this.color, size: this.size } };
-    this.sample(e); this.schedulePaint(); this.state();
+    this.sample(e); this.holdShape(e); this.schedulePaint(); this.state();
   }
   private eventPoint(e: PointerEvent): [number, number] {
-    const rect = this.ink.getBoundingClientRect();
-    return pdfPoint(this.viewport!.transform,
-      (e.clientX - rect.left) * this.viewport!.width / rect.width,
-      (e.clientY - rect.top) * this.viewport!.height / rect.height);
+    const rect = this.current.ink.getBoundingClientRect();
+    return pdfPoint(this.current.viewport!.transform,
+      (e.clientX - rect.left) * this.current.viewport!.width / rect.width,
+      (e.clientY - rect.top) * this.current.viewport!.height / rect.height);
   }
   private endTouch(e: PointerEvent): void {
     if (e.pointerType !== 'touch') return;
     this.touches.delete(e.pointerId);
     if (this.pan?.id === e.pointerId) this.pan = undefined;
-    try { this.ink.releasePointerCapture(e.pointerId); } catch { /* Capture may already be released. */ }
+    try { this.current.ink.releasePointerCapture(e.pointerId); } catch { /* Capture may already be released. */ }
   }
   private eraseAt(e: PointerEvent): void {
     const erase = this.erasing;
-    if (!erase || !this.viewport) return;
+    if (!erase || !this.current.viewport) return;
     const to = this.eventPoint(e);
-    const radius = 10 / Math.hypot(this.viewport.transform[0], this.viewport.transform[1]);
-    const retained = this.strokes.filter(s => !hitsStroke(s, erase.last, to, radius));
+    const radius = 10 / Math.hypot(this.current.viewport.transform[0], this.current.viewport.transform[1]);
+    const retained = this.current.strokes.filter(s => !hitsStroke(s, erase.last, to, radius));
     erase.last = to;
-    if (retained.length === this.strokes.length) return;
-    this.strokes = retained; erase.changed = true;
+    if (retained.length === this.current.strokes.length) return;
+    this.current.strokes = retained; erase.changed = true;
     this.redraw(); this.state();
   }
   private sample(e: PointerEvent, ending = false): void {
     const active = this.active;
-    if (!active || !this.viewport) return;
+    if (!active || !this.current.viewport) return;
     if (active.stroke.points.length >= LIMITS.pointsPerStroke ||
-        this.totalPoints + active.stroke.points.length >= LIMITS.totalPoints) {
+        this.current.totalPoints + active.stroke.points.length >= LIMITS.totalPoints) {
       this.finish('sample-limit'); new Notice('笔迹点数达到探针上限，已结束该笔'); return;
     }
     const [x, y] = this.eventPoint(e);
@@ -552,15 +675,32 @@ class ProbeView extends ItemView {
     this.pointerStats.coalescedSamples += points.length;
     for (const p of points) this.sample(p);
     this.sample(e);
+    this.holdShape(e);
     this.schedulePaint();
   }
+  private holdShape(e: PointerEvent): void {
+    if (!this.active || this.active.stroke.pointerType !== 'pen' || this.active.stroke.kind !== 'pen') return;
+    if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) < 4) return;
+    window.clearTimeout(this.shapeTimer);
+    this.shapeAnchor = [e.clientX, e.clientY];
+    if (this.fitted) { this.fitted = undefined; this.context(this.current.ink, true); this.paintedPoints = 0; }
+    const active = this.active;
+    this.shapeTimer = window.setTimeout(() => {
+      if (this.active !== active || this.closed) return;
+      this.fitted = fitShape(active.stroke.points);
+      if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) this.fitted = undefined;
+      if (this.fitted) { this.context(this.current.ink, true); this.schedulePaint(); }
+    }, 1000);
+  }
   private finish(reason: string): void {
+    window.clearTimeout(this.shapeTimer); this.shapeAnchor = undefined;
+    const fitted = reason === 'pointerup' ? this.fitted : undefined; this.fitted = undefined;
     if (this.erasing) {
       const erase = this.erasing; this.erasing = undefined;
       this.lastPenAt = performance.now();
-      try { this.ink.releasePointerCapture(erase.pointerId); } catch { /* The system can revoke capture. */ }
+      try { this.current.ink.releasePointerCapture(erase.pointerId); } catch { /* The system can revoke capture. */ }
       if (erase.changed) {
-        this.history.record(erase.before, this.strokes); this.updateHistory();
+        this.current.history.record(erase.before, this.current.strokes); this.updateHistory();
         this.changed();
       }
       this.state(); return;
@@ -573,78 +713,92 @@ class ProbeView extends ItemView {
     this.endings.push({ reason, samples: active.stroke.points.length, durationMs: active.stroke.points.at(-1)?.[3] ?? 0 });
     this.endings = this.endings.slice(-30);
     if (active.stroke.points.length) {
-      const before = this.strokes.slice();
-      this.strokes.push(active.stroke);
-      this.history.record(before, this.strokes); this.updateHistory();
-      const ctx = this.context(this.committedInk);
+      const before = this.current.strokes.slice();
+      this.current.strokes.push(active.stroke);
+      this.current.history.record(before, this.current.strokes);
+      if (fitted) {
+        const raw = this.current.strokes.slice();
+        active.stroke = { ...active.stroke, points: fitted.points };
+        this.current.strokes = [...before, active.stroke];
+        this.current.history.record(raw, this.current.strokes);
+        this.shapeCounts[fitted.kind] = (this.shapeCounts[fitted.kind] ?? 0) + 1;
+      }
+      this.updateHistory();
+      const ctx = this.context(this.current.committedInk);
       if (ctx) this.drawStroke(ctx, active.stroke);
       this.changed();
     }
-    try { this.ink.releasePointerCapture(active.pointerId); } catch { /* Capture can be revoked by WebView. */ }
-    this.context(this.ink, true); this.paintedPoints = 0; this.state();
+    try { this.current.ink.releasePointerCapture(active.pointerId); } catch { /* Capture can be revoked by WebView. */ }
+    this.context(this.current.ink, true); this.paintedPoints = 0; this.state();
   }
   private changed(): void {
-    this.editVersion++;
-    this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
+    this.current.editVersion++;
+    this.current.totalPoints = this.current.strokes.reduce((n, s) => n + s.points.length, 0);
     this.state();
-    if (!this.saveDue) this.saveDue = performance.now() + 1500;
-    window.clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => {
-      this.saveDue = 0;
-      if (this.active || this.erasing) return; // The next completed edit schedules another save.
-      void this.save().catch(e => this.fail(e));
-    }, Math.max(0, Math.min(250, this.saveDue - performance.now())));
+    if (!this.current.saveDue) this.current.saveDue = performance.now() + 1500;
+    window.clearTimeout(this.current.saveTimer);
+    const p = this.current;
+    this.current.saveTimer = window.setTimeout(() => {
+      p.saveDue = 0;
+      if (p === this.current && (this.active || this.erasing)) return; // The next completed edit schedules another save.
+      void this.save(p).catch(e => this.fail(e));
+    }, Math.max(0, Math.min(250, this.current.saveDue - performance.now())));
   }
   private undoRedo(redo: boolean): void {
-    if (!this.ready || this.navigating) return;
+    if (!this.current.ready || this.navigating) return;
     this.finish('history');
-    if (redo ? !this.history.redoDepth : !this.history.undoDepth) return;
-    this.strokes = redo ? this.history.redo(this.strokes) : this.history.undo(this.strokes);
+    if (redo ? !this.current.history.redoDepth : !this.current.history.undoDepth) return;
+    this.current.strokes = redo ? this.current.history.redo(this.current.strokes) : this.current.history.undo(this.current.strokes);
     this.updateHistory(); this.changed(); this.redraw();
   }
   private updateHistory(): void {
-    this.undoButton.disabled = !this.history.undoDepth;
-    this.redoButton.disabled = !this.history.redoDepth;
-    this.undoButton.textContent = `撤销（${this.history.undoDepth}）`;
-    this.redoButton.textContent = `重做（${this.history.redoDepth}）`;
+    this.undoButton.disabled = !this.current.history.undoDepth;
+    this.redoButton.disabled = !this.current.history.redoDepth;
+    this.undoButton.textContent = '↶'; this.undoButton.setAttribute('aria-label', `撤销（${this.current.history.undoDepth}）`);
+    this.redoButton.textContent = '↷'; this.redoButton.setAttribute('aria-label', `重做（${this.current.history.redoDepth}）`);
   }
-  private async save(): Promise<void> {
-    if (this.saveTask) return this.saveTask;
-    if (!this.store) return;
-    this.saveTask = (async () => {
-      while (this.savedEditVersion < this.editVersion) {
-        if (this.active || this.erasing) break;
-        const version = this.editVersion;
+  private async save(p = this.current): Promise<void> {
+    if (p.saveTask) return p.saveTask;
+    if (!p.store) return;
+    p.saveTask = (async () => {
+      while (p.savedEditVersion < p.editVersion) {
+        if (p === this.current && (this.active || this.erasing)) break;
+        const version = p.editVersion;
         const started = performance.now();
-        const snapshot = JSON.parse(JSON.stringify(this.strokes)) as Stroke[];
-        const result = await this.store!.save(snapshot, version);
-        this.savedCount = result.count;
-        this.savedEditVersion = result.editVersion;
+        const snapshot = JSON.parse(JSON.stringify(p.strokes)) as Stroke[];
+        const result = await p.store!.save(snapshot, version);
+        p.savedCount = result.count;
+        p.savedEditVersion = result.editVersion;
         this.timings.saves++;
         this.timings.maxSaveMs = Math.max(this.timings.maxSaveMs, performance.now() - started);
-        this.saveError = '';
+        p.saveError = '';
         this.state();
       }
-    })().catch(e => { this.saveError = String(e); this.state(); throw e; }).finally(() => { this.saveTask = undefined; });
-    return this.saveTask;
+    })().catch(e => { p.saveError = String(e); this.state(); throw e; }).finally(() => { p.saveTask = undefined; });
+    return p.saveTask;
   }
   async flush(): Promise<void> {
     this.finish('flush');
-    window.clearTimeout(this.saveTimer); this.saveDue = 0;
-    if (!this.store) return;
-    await this.save();
+    const results = await Promise.allSettled([...this.pages.values()].map(p => {
+      window.clearTimeout(p.saveTimer); p.saveDue = 0;
+      return this.save(p);
+    }));
     this.state();
+    const failure = results.find(r => r.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
   }
   private async exportReport(): Promise<void> {
     await this.folder(ROOT);
-    const report = { ...this.report, exportedAt: new Date().toISOString(), runId: this.runId,
-      strokesInMemory: this.strokes.length, strokesSaved: this.savedCount, revision: this.store?.revision ?? 0,
-      saveError: this.saveError, pointer: this.pointerStats, errors: this.errors,
-      editVersion: this.editVersion, savedEditVersion: this.savedEditVersion,
+    const report = { ...this.report, exportedAt: new Date().toISOString(), runId: this.current.runId,
+      pages: [...this.pages.values()].filter(p => p.store).map(p => ({ page: p.number, strokes: p.strokes.length, saved: p.savedCount, revision: p.store?.revision, editVersion: p.editVersion, savedEditVersion: p.savedEditVersion, saveError: p.saveError })),
+      shapeCounts: this.shapeCounts,
+      strokesInMemory: this.current.strokes.length, strokesSaved: this.current.savedCount, revision: this.current.store?.revision ?? 0,
+      saveError: this.current.saveError, pointer: this.pointerStats, errors: this.errors,
+      editVersion: this.current.editVersion, savedEditVersion: this.current.savedEditVersion,
       inputEndings: this.endings, timings: this.timings, pressureGain: this.pressureGain,
       touchDiagnostics: { ...this.touchDiagnostics, activeTouches: this.touches.size, mode: this.mode,
         scrollTop: this.scroll.scrollTop, maxScrollTop: this.scroll.scrollHeight - this.scroll.clientHeight },
-      undoDepth: this.history.undoDepth, redoDepth: this.history.redoDepth,
+      undoDepth: this.current.history.undoDepth, redoDepth: this.current.history.redoDepth,
       drawing: 'Incremental active ink + committed canvas; finger pan while pen is up; whole-stroke eraser',
       privacy: 'No handwriting coordinates, recognized text or PDF bytes included. Local file only.' };
     const path = `${ROOT}/diagnostic-${Date.now()}-${uniqueId()}.json`;
@@ -654,11 +808,10 @@ class ProbeView extends ItemView {
   async onClose(): Promise<void> {
     this.finish('view-close');
     this.closed = true;
-    this.renderGeneration++;
-    this.renderTask?.cancel();
-    if (this.store) await this.flush().catch(e => this.fail(e));
-    await this.renderTask?.promise.catch(() => undefined);
-    this.page?.cleanup();
+    for (const p of this.pages.values()) { p.renderGeneration++; p.renderTask?.cancel(); window.clearTimeout(p.saveTimer); }
+    await this.flush().catch(e => this.fail(e));
+    await this.refreshTask?.catch(() => undefined);
+    for (const p of this.pages.values()) { await p.renderTask?.promise.catch(() => undefined); p.page?.cleanup(); }
     await this.pdfTask?.destroy().catch(e => this.fail(e));
   }
 }

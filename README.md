@@ -1,8 +1,8 @@
 # InkPDF 最小设备探针
 
-当前本地版本 0.0.6，新增当前页撤销/重做、荧光笔、颜色和粗细选择。沿用多页独立保存，原 PDF 只读，新版尚未实机验收。Apple Pencil 笔体双击继续暂缓。
+当前版本 0.0.7（待 iPad 验收）：连续纵向滚动、钢笔停留 1 秒图形拟合、单行工具栏。沿用逐页独立保存和只读原 PDF；Apple Pencil 笔体双击继续暂缓。
 
-本阶段 iPad 测试步骤：[docs/EDITING_0.0.6.md](docs/EDITING_0.0.6.md)。0.0.5 实机基线：[docs/IPAD_ACCEPTANCE_0.0.5.md](docs/IPAD_ACCEPTANCE_0.0.5.md)。
+本阶段 iPad 测试步骤：[docs/CONTINUOUS_0.0.7.md](docs/CONTINUOUS_0.0.7.md)。0.0.5 实机基线：[docs/IPAD_ACCEPTANCE_0.0.5.md](docs/IPAD_ACCEPTANCE_0.0.5.md)。
 
 ## 构建与检查
 

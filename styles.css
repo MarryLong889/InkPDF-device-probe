@@ -1,14 +1,20 @@
-.inkpdf-probe { display: flex; flex-direction: column; height: 100%; padding: 12px; gap: 8px; overflow: hidden; }
-.inkpdf-probe h2, .inkpdf-probe p { margin: 0; }
-.inkpdf-probe p, .inkpdf-probe-capability { font-size: 12px; color: var(--text-muted); }
-.inkpdf-probe-controls { display: flex; gap: 6px; flex-wrap: wrap; }
-.inkpdf-probe-controls button { min-height: 40px; padding: 6px 12px; }
-.inkpdf-probe-status { min-height: 24px; font-size: 13px; overflow-wrap: anywhere; }
-.inkpdf-probe-scroll { flex: 1; min-height: 100px; overflow: auto; padding: 12px; background: #e5e9ed; overscroll-behavior: contain; }
-.inkpdf-probe-sheet { position: relative; background: white; box-shadow: 0 2px 12px #0002; }
-.inkpdf-probe-sheet canvas { display: block; }
-.inkpdf-probe-ink { position: absolute; inset: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-.inkpdf-probe-committed { position: absolute; inset: 0; pointer-events: none; }
-.inkpdf-probe-gain { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
-.inkpdf-probe-gain select { min-height: 40px; }
-.inkpdf-probe-source { font-size: 12px; overflow-wrap: anywhere; }
+.inkpdf-probe { display:flex; flex-direction:column; height:100%; padding:8px; gap:4px; overflow:hidden; }
+.inkpdf-probe-controls { display:flex; align-items:center; gap:6px; flex-wrap:nowrap; overflow-x:auto; flex-shrink:0; padding:4px; border-radius:14px; background:var(--background-secondary,#f4f5f6); }
+.inkpdf-probe-controls > * { flex-shrink:0; }
+.inkpdf-probe button,.inkpdf-probe select,.inkpdf-probe summary { min-height:44px; }
+.inkpdf-probe-controls button { padding:4px 10px; border-radius:12px; }
+.inkpdf-probe-status { min-height:20px; font-size:12px; overflow-wrap:anywhere; }
+.inkpdf-probe-more { flex-shrink:0; font-size:12px; max-height:35%; overflow:auto; }
+.inkpdf-probe-more summary { cursor:pointer; min-height:24px; }
+.inkpdf-probe-more p { margin:4px 0; color:var(--text-muted); }
+.inkpdf-probe-options { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.inkpdf-probe-scroll { position:relative; flex:1; min-height:100px; overflow:auto; padding:12px; background:#e5e9ed; overscroll-behavior:contain; overflow-anchor:none; }
+.inkpdf-probe-sheet { position:relative; background:white; box-shadow:0 2px 12px #0002; margin-bottom:16px; flex-shrink:0; }
+.inkpdf-probe-sheet canvas { display:block; }
+.inkpdf-probe-ink { position:absolute; inset:0; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+.inkpdf-probe-committed { position:absolute; inset:0; pointer-events:none; }
+.inkpdf-probe-gain { display:inline-flex; align-items:center; gap:4px; font-size:12px; }
+.inkpdf-probe-source { font-size:12px; overflow-wrap:anywhere; }
+.inkpdf-probe-capability { font-size:12px; color:var(--text-muted); }
+
+.inkpdf-probe-sheet:not([data-loaded="true"])::after { content:"页面加载中…"; position:absolute; top:24px; left:24px; color:#637080; pointer-events:none; }

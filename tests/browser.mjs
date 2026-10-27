@@ -36,9 +36,10 @@ try {
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-capability')?.textContent.includes('PASS'));
   checks.push('Real PDF.js 6.4.299 page render in Chromium with mocked Obsidian host; module Worker + basic WASM PASS');
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   const sourceBefore = await page.evaluate(() => Object.entries(window.readFiles()).find(([p]) => p.endsWith('/probe.pdf'))[1]);
   await page.evaluate(() => {
-    const canvas = document.querySelector('.inkpdf-probe-ink');
+    const canvas = document.querySelector('.inkpdf-probe-ink[data-active]');
     const r = canvas.getBoundingClientRect();
     for (let i = 0; i < 20; i++) {
       const p = { pointerId: i + 10, pointerType: 'pen', button: 0, buttons: 1, bubbles: true, clientX: r.left + 70, clientY: r.top + 140 + i * 15, pressure: .2 };
@@ -64,9 +65,11 @@ try {
   await page.getByRole('button', { name: '100%', exact: true }).click();
   await page.screenshot({ path: '.test/probe-tablet.png' });
   await page.reload();
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('20 笔'));
   assert.deepEqual((await latest()).strokes, original.strokes);
   checks.push('Zoom and full browser reload preserve all PDF-space samples exactly');
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).some(p => p.includes('diagnostic-')));
   const report = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
@@ -77,7 +80,7 @@ try {
   assert.equal(sourceAfter, sourceBefore);
   checks.push('Synthetic source PDF bytes unchanged');
   await page.evaluate(() => { window.failWrites = true; });
-  const ink = page.locator('.inkpdf-probe-ink');
+  const ink = page.locator('.inkpdf-probe-ink[data-active]');
   const r = await ink.boundingBox();
   await page.mouse.move(r.x + 70, r.y + 150); await page.mouse.down(); await page.mouse.move(r.x + 130, r.y + 170); await page.mouse.up();
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('失败'));
@@ -87,7 +90,7 @@ try {
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('21 笔') && document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   checks.push('Write failure remains visibly unsaved; retry restores 21st stroke');
   await page.evaluate(() => {
-    const canvas = document.querySelector('.inkpdf-probe-ink'), r = canvas.getBoundingClientRect();
+    const canvas = document.querySelector('.inkpdf-probe-ink[data-active]'), r = canvas.getBoundingClientRect();
     const p = { pointerId: 77, pointerType: 'pen', button: 0, buttons: 1, bubbles: true, clientX: r.left + 180, clientY: r.top + 180, pressure: .1 };
     canvas.dispatchEvent(new PointerEvent('pointerdown', p));
     canvas.dispatchEvent(new PointerEvent('lostpointercapture', p));
@@ -113,7 +116,7 @@ try {
   checks.push('Capture loss and height-only resize do not split pen stroke; final pointerup endpoint saved; palm cannot pan during pen contact');
   await page.waitForTimeout(200);
   const panResult = await page.evaluate(() => {
-    const canvas = document.querySelector('.inkpdf-probe-ink'), r = canvas.getBoundingClientRect();
+    const canvas = document.querySelector('.inkpdf-probe-ink[data-active]'), r = canvas.getBoundingClientRect();
     const scroll = document.querySelector('.inkpdf-probe-scroll');
     const before = scroll.scrollTop;
     const p = { pointerId: 102, pointerType: 'touch', width: 64, height: 64, button: 0, buttons: 1, bubbles: true, clientX: r.left + 180, clientY: r.top + 300 };
@@ -128,7 +131,7 @@ try {
   await page.evaluate(() => {
     const view = window.mockApp.workspace.getLeavesOfType()[0].view;
     view.lastPenAt = performance.now(); // Reproduce a finger landing inside the pen-up guard window.
-    const canvas = document.querySelector('.inkpdf-probe-ink'), r = canvas.getBoundingClientRect();
+    const canvas = document.querySelector('.inkpdf-probe-ink[data-active]'), r = canvas.getBoundingClientRect();
     const scroll = document.querySelector('.inkpdf-probe-scroll'); scroll.scrollTop = 0;
     const p = { pointerId: 103, pointerType: 'touch', width: 64, height: 64, bubbles: true, clientX: r.left + 200, clientY: 600 };
     window.testTouch = p;
@@ -148,9 +151,9 @@ try {
   await page.getByRole('button', { name: '工具：钢笔', exact: true }).click();
   const eraserTarget = await page.evaluate(() => {
     const view = window.mockApp.workspace.getLeavesOfType()[0].view;
-    const [x, y] = view.strokes[10].points[0];
-    const [a, b, c, d, e, f] = view.viewport.transform;
-    const r = document.querySelector('.inkpdf-probe-ink').getBoundingClientRect();
+    const [x, y] = view.current.strokes[10].points[0];
+    const [a, b, c, d, e, f] = view.current.viewport.transform;
+    const r = document.querySelector('.inkpdf-probe-ink[data-active]').getBoundingClientRect();
     return { x: r.left + a * x + c * y + e, y: r.top + b * x + d * y + f };
   });
   await page.mouse.click(eraserTarget.x, eraserTarget.y);
@@ -172,15 +175,17 @@ try {
   await page.mouse.click(eraserTarget.x, eraserTarget.y);
   await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
   await page.reload();
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('21 笔'));
   assert.equal((await latest()).strokes.length, 21);
   checks.push('Whole-stroke eraser decreases count, one-step restore works, erased state survives reload');
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).filter(p => p.includes('diagnostic-')).length >= 2);
   const finalReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
-  assert.equal(finalReport.probeVersion, '0.0.6');
+  assert.equal(finalReport.probeVersion, '0.0.7');
   assert.equal(finalReport.strokesSaved, 21);
-  await page.screenshot({ path: '.test/probe-0.0.6.png' });
+  await page.screenshot({ path: '.test/probe-0.0.7.png' });
   // Independent two-page PDF, loaded through the vault API rather than the embedded fixture.
   const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 5 0 R >>',
@@ -196,14 +201,15 @@ try {
     localStorage.setItem('inkpdf-test-files', JSON.stringify(files));
     await window.plugin.open(true, 'Documents/A.pdf');
   }, pdfA);
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   const viewState = () => page.evaluate(() => {
     const v = window.mockApp.workspace.getLeavesOfType()[0].view;
-    return { ready: v.ready, run: v.runId, strokes: v.strokes, pdf: v.report.pdf };
+    return { ready: v.current.ready, run: v.current.runId, strokes: v.current.strokes, pdf: v.report.pdf };
   });
   assert.equal((await viewState()).ready, true);
   assert.equal((await viewState()).pdf.pages, 2);
   assert.equal((await viewState()).pdf.selectedPage, 1);
-  const aRect = await page.locator('.inkpdf-probe-ink').boundingBox();
+  const aRect = await page.locator('.inkpdf-probe-ink[data-active]').boundingBox();
   await page.mouse.move(aRect.x + 100, aRect.y + 100); await page.mouse.down();
   await page.mouse.move(aRect.x + 180, aRect.y + 140); await page.mouse.up();
   await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
@@ -213,7 +219,7 @@ try {
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 2 / 2 页'));
   assert.equal((await viewState()).strokes.length, 0);
   assert.ok((await viewState()).run.endsWith('-p2'));
-  const p2 = await page.locator('.inkpdf-probe-ink').boundingBox();
+  const p2 = await page.locator('.inkpdf-probe-ink[data-active]').boundingBox();
   await page.mouse.move(p2.x + 160, p2.y + 100); await page.mouse.down();
   await page.mouse.move(p2.x + 210, p2.y + 150); await page.mouse.up();
   // Navigate immediately: page switch must flush, not discard the debounce window.
@@ -226,10 +232,11 @@ try {
   assert.equal(savedSecond.strokes.length, 1);
   assert.notDeepEqual(savedSecond.strokes, savedA.strokes);
   await page.reload();
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-controls')?.textContent.includes('第 2 / 2 页'));
   assert.deepEqual((await viewState()).strokes, savedSecond.strokes);
   await page.evaluate(() => { window.failWrites = true; });
-  const p2b = await page.locator('.inkpdf-probe-ink').boundingBox();
+  const p2b = await page.locator('.inkpdf-probe-ink[data-active]').boundingBox();
   await page.mouse.move(p2b.x + 230, p2b.y + 140); await page.mouse.down();
   await page.mouse.move(p2b.x + 260, p2b.y + 180); await page.mouse.up();
   await page.getByRole('button', { name: '上一页', exact: true }).click();
@@ -252,6 +259,7 @@ try {
   checks.push('Per-page ink isolated, immediate navigation flushes, restart resumes page 2, failed save blocks navigation without losing ink, retry works');
   checks.push('Explicit pen/eraser command toggles tool; no simulated Pencil barrel double tap');
   await page.reload();
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('1 笔'));
   assert.deepEqual((await viewState()).strokes, savedA.strokes);
   await page.evaluate(async () => {
@@ -291,6 +299,7 @@ try {
   await page.evaluate(async () => { await window.plugin.open(true, 'Documents/Renamed.pdf'); });
   assert.deepEqual((await viewState()).strokes, savedA.strokes);
   assert.equal(await page.evaluate(() => window.readFiles()['Documents/Broken.pdf']), Buffer.from('This is not a PDF').toString('base64'));
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   const pdfReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
   assert.equal(pdfReport.pdf.selectedPage, 1);
@@ -298,7 +307,7 @@ try {
   assert.equal(JSON.stringify(pdfReport).includes('Renamed.pdf'), false);
   await page.getByRole('button', { name: '荧光笔', exact: true }).click();
   await page.getByLabel('粗细（只影响新笔迹）').selectOption('2');
-  const markerRect = await page.locator('.inkpdf-probe-ink').boundingBox();
+  const markerRect = await page.locator('.inkpdf-probe-ink[data-active]').boundingBox();
   await page.mouse.move(markerRect.x + 100, markerRect.y + 210); await page.mouse.down();
   await page.mouse.move(markerRect.x + 260, markerRect.y + 210, { steps: 16 }); await page.mouse.up();
   await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
@@ -307,7 +316,7 @@ try {
   assert.equal(markerState.strokes.at(-1).color, '#f4d03f');
   assert.equal(markerState.strokes.at(-1).size, 2);
   const pixels = await page.evaluate(() => {
-    const c = document.querySelector('.inkpdf-probe-committed'), r = c.getBoundingClientRect();
+    const c = document.querySelector('.inkpdf-probe-committed[data-active]'), r = c.getBoundingClientRect();
     return [120, 180, 240].map(x => c.getContext('2d').getImageData(Math.round(x*c.width/r.width), Math.round(210*c.height/r.height), 1, 1).data[3]);
   });
   assert.ok(pixels.every(a => a >= 75 && a <= 78), JSON.stringify(pixels));
@@ -318,15 +327,16 @@ try {
   await page.getByRole('button', { name: '保存并重新读取', exact: true }).click();
   await page.waitForTimeout(250);
   await page.screenshot({path:'.test/style-before.png'});
-  const inkBefore = await page.locator('.inkpdf-probe-committed').evaluate(c => c.toDataURL());
+  const inkBefore = await page.locator('.inkpdf-probe-committed[data-active]').evaluate(c => c.toDataURL());
   await page.reload();
+  await page.locator('.inkpdf-probe-more').evaluate(e => e.open = true);
   await page.waitForFunction(() => document.querySelector('.inkpdf-probe-status')?.textContent.includes('已保存'));
   assert.deepEqual((await viewState()).strokes, markerState.strokes);
   await page.waitForTimeout(250);
   await page.screenshot({path:'.test/style-after.png'});
   const pixelDiff = await page.evaluate(async previous => {
     const image = await createImageBitmap(await (await fetch(previous)).blob());
-    const c = document.querySelector('.inkpdf-probe-committed');
+    const c = document.querySelector('.inkpdf-probe-committed[data-active]');
     const prior = document.createElement('canvas'); prior.width = c.width; prior.height = c.height;
     prior.getContext('2d').drawImage(image, 0, 0); image.close();
     const a = prior.getContext('2d').getImageData(0,0,c.width,c.height).data;
@@ -348,7 +358,7 @@ try {
   assert.ok(pixelDiff.alpha.every(a=>a>=75 && a<=78));
   await page.getByLabel('颜色（只影响新笔迹）').selectOption('#d93025');
   await page.getByLabel('粗细（只影响新笔迹）').selectOption('0.5');
-  const penRect = await page.locator('.inkpdf-probe-ink').boundingBox();
+  const penRect = await page.locator('.inkpdf-probe-ink[data-active]').boundingBox();
   await page.mouse.move(penRect.x + 100, penRect.y + 260); await page.mouse.down();
   await page.mouse.move(penRect.x + 220, penRect.y + 260); await page.mouse.up();
   assert.equal((await viewState()).strokes.at(-1).color, '#d93025');
@@ -356,10 +366,108 @@ try {
   await page.getByRole('button', { name: /^重做/ }).click();
   await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
   checks.push('Highlighter has uniform 30% alpha, undo/redo preserves styles, reload preserves geometry and interior opacity, new red thin pen does not restyle old ink');
-  await page.screenshot({ path: '.test/vault-pdf-0.0.6.png' });
+  await page.screenshot({ path: '.test/vault-pdf-0.0.7.png' });
   checks.push('Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1');
+
+  // True continuous scroll, including mixed page sizes and eviction/reload.
+  const multiObjects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R] /Count 6 >>'];
+  for(let i=0;i<6;i++) multiObjects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${i%2?500:595} ${i%2?650:842}] /Resources << >> /Contents 9 0 R >>`);
+  multiObjects.push('<< /Length 0 >>\nstream\n\nendstream');
+  let multi='%PDF-1.4\n', multiOffsets=[0];
+  for(let i=0;i<multiObjects.length;i++){multiOffsets.push(multi.length);multi+=`${i+1} 0 obj\n${multiObjects[i]}\nendobj\n`;}
+  const multiXref=multi.length;
+  multi+=`xref\n0 10\n0000000000 65535 f \n${multiOffsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')}trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n${multiXref}\n%%EOF\n`;
+  await page.evaluate(async data=>{
+    const files=window.readFiles();files['Documents/Continuous.pdf']=data;localStorage.setItem('inkpdf-test-files',JSON.stringify(files));
+    await window.plugin.open(true,'Documents/Continuous.pdf');
+  },Buffer.from(multi).toString('base64'));
+  const compact=await page.evaluate(()=>{
+    const toolbar=document.querySelector('.inkpdf-probe-controls'),scroll=document.querySelector('.inkpdf-probe-scroll');
+    return {height:toolbar.getBoundingClientRect().height,available:scroll.clientHeight,details:document.querySelector('details').open};
+  });
+  assert.equal(compact.details,false);assert.ok(compact.height<=60);assert.ok(compact.available>750);
+  await page.screenshot({path:'.test/compact-0.0.7.png'});
+  const scrollToPage=async n=>{
+    await page.evaluate(n=>{
+      const v=window.mockApp.workspace.getLeavesOfType()[0].view,p=v.pages.get(n);
+      v.scroll.scrollTop+=p.sheet.getBoundingClientRect().top-v.scroll.getBoundingClientRect().top-12;
+    },n);
+    await page.waitForFunction(n=>{const v=window.mockApp.workspace.getLeavesOfType()[0].view;return v.pageNumber===n&&v.current.rendered&&!v.refreshTask;},n);
+  };
+  const simpleStroke=async ()=>page.evaluate(()=>{
+    const v=window.mockApp.workspace.getLeavesOfType()[0].view,c=v.current.ink,r=c.getBoundingClientRect();
+    const p={pointerId:900,pointerType:'pen',button:0,buttons:1,bubbles:true,pressure:.3,clientX:r.left+80,clientY:r.top+100};
+    c.dispatchEvent(new PointerEvent('pointerdown',p));
+    document.dispatchEvent(new PointerEvent('pointermove',{...p,clientX:p.clientX+80}));
+    document.dispatchEvent(new PointerEvent('pointerup',{...p,clientX:p.clientX+80,buttons:0}));
+  });
+  await simpleStroke();
+  // Scroll before the debounce save; the first page's async save must retain its own identity.
+  await scrollToPage(2);await simpleStroke();await scrollToPage(6);await simpleStroke();
+  await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.flush());
+  const counts=await page.evaluate(()=>Object.entries(window.readFiles()).filter(([k])=>k.includes('/snapshots/')).map(([,v])=>JSON.parse(v)).filter(v=>v.sourceHash===window.mockApp.workspace.getLeavesOfType()[0].view.sourceHash).map(v=>({page:v.runId.split('-p').at(-1),count:v.strokes.length})));
+  for(const n of ['1','2','6'])assert.ok(counts.some(p=>p.page===n&&p.count===1));
+  assert.ok(await page.evaluate(()=>[...window.mockApp.workspace.getLeavesOfType()[0].view.pages.values()].filter(p=>p.rendered).length<=3));
+  await scrollToPage(1);assert.equal((await viewState()).strokes.length,1);
+  // One touch gesture crosses a page boundary without lifting.
+  await page.waitForTimeout(200);
+  await page.evaluate(()=>{
+    const v=window.mockApp.workspace.getLeavesOfType()[0].view;
+    const p={pointerId:901,pointerType:'touch',bubbles:true,clientX:200,clientY:600};
+    v.current.ink.dispatchEvent(new PointerEvent('pointerdown',p));
+    document.dispatchEvent(new PointerEvent('pointermove',{...p,clientY:-500}));
+    document.dispatchEvent(new PointerEvent('pointermove',{...p,clientY:-800}));
+    document.dispatchEvent(new PointerEvent('pointerup',{...p,clientY:-800}));
+  });
+  await page.waitForFunction(()=>window.mockApp.workspace.getLeavesOfType()[0].view.pageNumber>=2);
+  await scrollToPage(6);
+  await page.reload();await page.waitForFunction(()=>window.mockApp?.workspace.getLeavesOfType()[0]?.view.current.ready);
+  assert.equal((await viewState()).pdf.selectedPage,6);assert.equal((await viewState()).strokes.length,1);
+  // An offscreen failed save stays pinned and is retried without contaminating another page.
+  await page.evaluate(()=>{window.failWrites=true;});await simpleStroke();await scrollToPage(2);
+  await page.waitForFunction(()=>document.querySelector('.inkpdf-probe-status').textContent.includes('失败'));
+  await simpleStroke();await page.waitForTimeout(300);
+  await page.evaluate(async()=>{window.failWrites=false;await window.mockApp.workspace.getLeavesOfType()[0].view.flush();});
+  await scrollToPage(6);assert.equal((await viewState()).strokes.length,2);
+  await scrollToPage(2);assert.equal((await viewState()).strokes.length,2);
+  checks.push('Continuous mixed-size page stack: single touch crosses boundaries, immediate scroll saves to original page, three canvas pages retained, eviction/reload and restart preserve ink; offscreen save failures retry independently');
+  checks.push('Closed More panel leaves a single toolbar row under 60px and over 750px PDF height at 820x980');
+  // Dwell previews fit; early lift and movement cancel; undo restores raw samples.
+  const beginShape=async kind=>page.evaluate(kind=>{
+    const v=window.mockApp.workspace.getLeavesOfType()[0].view,c=v.current.ink,r=c.getBoundingClientRect();
+    let xy;
+    if(kind==='circle')xy=Array.from({length:80},(_,i)=>[180+50*Math.cos(i*2*Math.PI/79),220+50*Math.sin(i*2*Math.PI/79)]);
+    else if(kind==='rectangle'){
+      xy=[];for(let i=0;i<=20;i++)xy.push([100+i*5,180]);for(let i=1;i<=20;i++)xy.push([200,180+i*3]);for(let i=1;i<=20;i++)xy.push([200-i*5,240]);for(let i=1;i<=20;i++)xy.push([100,240-i*3]);
+    }else xy=Array.from({length:25},(_,i)=>[80+i*5,160+Math.sin(i)]);
+    const base={pointerId:902,pointerType:'pen',button:0,buttons:1,bubbles:true,pressure:.3};
+    xy.forEach(([x,y],i)=>{const p={...base,clientX:r.left+x,clientY:r.top+y};(i?document:c).dispatchEvent(new PointerEvent(i?'pointermove':'pointerdown',p));window.shapeEnd=p;});
+  },kind);
+  const endShape=async()=>page.evaluate(()=>document.dispatchEvent(new PointerEvent('pointerup',{...window.shapeEnd,buttons:0})));
+  await beginShape('line');await page.waitForTimeout(300);await endShape();
+  assert.ok((await viewState()).strokes.at(-1).points.length>2);
+  for(const kind of ['line','rectangle','circle']){
+    await beginShape(kind);await page.waitForTimeout(1150);
+    assert.equal(await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.fitted?.kind),kind);
+    const raw=await page.evaluate(()=>structuredClone(window.mockApp.workspace.getLeavesOfType()[0].view.active.stroke.points));
+    await endShape();const fitted=(await viewState()).strokes.at(-1);
+    assert.equal(fitted.points.length,{line:2,rectangle:5,circle:65}[kind]);
+    await page.getByRole('button',{name:/^撤销/}).click();
+    assert.deepEqual((await viewState()).strokes.at(-1).points.slice(0,raw.length),raw);
+    await page.getByRole('button',{name:/^重做/}).click();
+    assert.deepEqual((await viewState()).strokes.at(-1),fitted);
+  }
+  await beginShape('line');await page.waitForTimeout(1150);
+  await page.evaluate(()=>document.dispatchEvent(new PointerEvent('pointermove',{...window.shapeEnd,clientY:window.shapeEnd.clientY+30})));
+  assert.equal(await page.evaluate(()=>!!window.mockApp.workspace.getLeavesOfType()[0].view.fitted),false);
+  await endShape();
+  const shapeSaved=(await viewState()).strokes;
+  await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.flush());await page.reload();
+  await page.waitForFunction(()=>window.mockApp?.workspace.getLeavesOfType()[0]?.view.current.ready);
+  assert.deepEqual((await viewState()).strokes,shapeSaved);
+  checks.push('Pencil dwell: early lift stays freehand, one-second line/rectangle/circle fit, movement cancels preview, undo restores original, redo and restart preserve fitted geometry');
   assert.equal(failures.length, 0, failures.join('\n'));
-  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.6', status: 'PASS', browser: await browser.version(), checks,
+  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.7', status: 'PASS', browser: await browser.version(), checks,
     notRun: ['real Obsidian', 'iPad WKWebView', 'Apple Pencil', 'OCR', 'GitHub sync'] }, null, 2));
   console.log(checks.join('\n'));
 } finally {

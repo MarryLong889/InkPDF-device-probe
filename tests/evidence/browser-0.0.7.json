@@ -1,0 +1,34 @@
+{
+  "probeVersion": "0.0.7",
+  "status": "PASS",
+  "browser": "145.0.7632.6",
+  "checks": [
+    "Real PDF.js 6.4.299 page render in Chromium with mocked Obsidian host; module Worker + basic WASM PASS",
+    "20 synthetic pen strokes saved; touch ignored (synthetic events, NOT Apple Pencil validation)",
+    "Zoom and full browser reload preserve all PDF-space samples exactly",
+    "Diagnostic export contains counts/capabilities, no stroke coordinates",
+    "Synthetic source PDF bytes unchanged",
+    "Write failure remains visibly unsaved; retry restores 21st stroke",
+    "Capture loss and height-only resize do not split pen stroke; final pointerup endpoint saved; palm cannot pan during pen contact",
+    "One-finger pan works in writing mode after pen-up without creating strokes",
+    "Finger landing during cooldown can pan later without lifting; 64px contact is accepted",
+    "Two erase transactions restore in order and persist",
+    "Whole-stroke eraser decreases count, one-step restore works, erased state survives reload",
+    "Per-page ink isolated, immediate navigation flushes, restart resumes page 2, failed save blocks navigation without losing ink, retry works",
+    "Explicit pen/eraser command toggles tool; no simulated Pencil barrel double tap",
+    "Vault two-page PDF opens page 1, saves/reloads exact ink; rename preserves association, replacement isolates ink, source unchanged and not copied",
+    "Missing PDF fails visibly; another PDF can still open without losing existing annotations",
+    "Highlighter has uniform 30% alpha, undo/redo preserves styles, reload preserves geometry and interior opacity, new red thin pen does not restyle old ink",
+    "Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1",
+    "Continuous mixed-size page stack: single touch crosses boundaries, immediate scroll saves to original page, three canvas pages retained, eviction/reload and restart preserve ink; offscreen save failures retry independently",
+    "Closed More panel leaves a single toolbar row under 60px and over 750px PDF height at 820x980",
+    "Pencil dwell: early lift stays freehand, one-second line/rectangle/circle fit, movement cancels preview, undo restores original, redo and restart preserve fitted geometry"
+  ],
+  "notRun": [
+    "real Obsidian",
+    "iPad WKWebView",
+    "Apple Pencil",
+    "OCR",
+    "GitHub sync"
+  ]
+}

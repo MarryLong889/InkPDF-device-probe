@@ -177,6 +177,42 @@ var ProbeStore = class _ProbeStore {
   }
 };
 
+// src/shapes.ts
+function fitShape(raw) {
+  if (raw.length < 5) return null;
+  const distances = [0];
+  for (let i = 1; i < raw.length; i++) distances.push(distances[i - 1] + Math.hypot(raw[i][0] - raw[i - 1][0], raw[i][1] - raw[i - 1][1]));
+  const length = distances.at(-1);
+  if (length < 30) return null;
+  const samples = [];
+  let j = 1;
+  for (let i = 0; i <= 64; i++) {
+    const d = length * i / 64;
+    while (j < raw.length - 1 && distances[j] < d) j++;
+    const t = (d - distances[j - 1]) / (distances[j] - distances[j - 1] || 1);
+    samples.push([raw[j - 1][0] + t * (raw[j][0] - raw[j - 1][0]), raw[j - 1][1] + t * (raw[j][1] - raw[j - 1][1])]);
+  }
+  const first = samples[0], last = samples.at(-1);
+  const chord = Math.hypot(last[0] - first[0], last[1] - first[1]);
+  const pressure = raw.reduce((n, p) => n + (p[2] ?? 0.3), 0) / raw.length;
+  const result = (kind, xy) => ({ kind, points: xy.map((p, i) => [p[0], p[1], pressure, raw.at(-1)[3] * i / (xy.length - 1)]) });
+  if (chord >= 30 && length / chord < 1.15 && samples.every((p) => Math.abs((p[0] - first[0]) * (last[1] - first[1]) - (p[1] - first[1]) * (last[0] - first[0])) / chord < Math.max(3, chord * 0.045))) return result("line", [first, last]);
+  const xs = samples.map((p) => p[0]), ys = samples.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const w = x1 - x0, h = y1 - y0;
+  if (Math.min(w, h) < 20 || chord > Math.min(w, h) * 0.25) return null;
+  const perimeter = 2 * (w + h);
+  const corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const tolerance = Math.min(w, h) * 0.12;
+  if (length / perimeter > 0.85 && length / perimeter < 1.15 && samples.every((p) => Math.min(p[0] - x0, x1 - p[0], p[1] - y0, y1 - p[1]) < tolerance) && corners.every((c) => samples.some((p) => Math.hypot(p[0] - c[0], p[1] - c[1]) < tolerance * 1.5))) return result("rectangle", [...corners, corners[0]]);
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, radius = (w + h) / 4;
+  if (w / h < 0.8 || w / h > 1.25 || length / (2 * Math.PI * radius) < 0.85 || length / (2 * Math.PI * radius) > 1.15) return null;
+  if (!samples.every((p) => Math.abs(Math.hypot(p[0] - cx, p[1] - cy) - radius) < radius * 0.15)) return null;
+  const bins = new Set(samples.map((p) => Math.floor((Math.atan2(p[1] - cy, p[0] - cx) + Math.PI) / (2 * Math.PI) * 12) % 12));
+  if (bins.size !== 12) return null;
+  return result("circle", Array.from({ length: 65 }, (_, i) => [cx + radius * Math.cos(i * Math.PI / 32), cy + radius * Math.sin(i * Math.PI / 32)]));
+}
+
 // src/capabilities.ts
 async function workerProbe() {
   if (typeof Worker === "undefined") return { status: "FAIL", error: "Worker unavailable" };
@@ -292,6 +328,36 @@ var InkPDFProbe = class extends import_obsidian.Plugin {
     }
   }
 };
+var PageState = class {
+  constructor(number) {
+    this.number = number;
+  }
+  number;
+  loading;
+  rendered = false;
+  runId = "";
+  store = void 0;
+  strokes = [];
+  savedCount = 0;
+  editVersion = 0;
+  savedEditVersion = 0;
+  history = new EditHistory();
+  totalPoints = 0;
+  saveTimer = void 0;
+  saveDue = 0;
+  page = void 0;
+  viewport = void 0;
+  renderTask = void 0;
+  renderGeneration = 0;
+  ready = false;
+  dpr = 1;
+  saveTask = void 0;
+  saveError = "";
+  sheet = void 0;
+  pdfCanvas = void 0;
+  ink = void 0;
+  committedInk = void 0;
+};
 var ProbeView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -300,15 +366,16 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.pageNumber = this.pdfPath ? plugin.lastPage : 1;
   }
   plugin;
-  runId = "";
-  store;
-  strokes = [];
-  savedCount = 0;
-  editVersion = 0;
-  savedEditVersion = 0;
+  pages = /* @__PURE__ */ new Map();
+  current = new PageState(1);
+  refreshTask;
+  sourceHash = "";
+  shapeTimer;
+  shapeAnchor;
+  fitted;
+  shapeCounts = {};
   active;
   erasing;
-  history = new EditHistory();
   undoButton;
   redoButton;
   tool = "pen";
@@ -325,32 +392,17 @@ var ProbeView = class extends import_obsidian.ItemView {
   pan;
   lastPenAt = -Infinity;
   touchDiagnostics = { moves: 0, blockedPen: 0, blockedMulti: 0, cooldownMoves: 0, maxContact: 0, scrollChanges: 0 };
-  totalPoints = 0;
   frame = 0;
   paintedPoints = 0;
-  saveTimer;
-  saveDue = 0;
   renderedWidth = 0;
   pdf;
   pdfTask;
-  page;
-  viewport;
-  renderTask;
-  renderGeneration = 0;
   closed = false;
-  ready = false;
   mode = "write";
   zoom = 1;
-  dpr = 1;
-  saveTask;
-  saveError = "";
   status;
   capability;
   scroll;
-  sheet;
-  pdfCanvas;
-  ink;
-  committedInk;
   inputStatus;
   timings = { paints: 0, maxPaintMs: 0, saves: 0, maxSaveMs: 0, maxEventGapMs: 0 };
   endings = [];
@@ -382,10 +434,11 @@ var ProbeView = class extends import_obsidian.ItemView {
     }
   }
   toggleTool() {
-    if (!this.ready || this.navigating) return;
+    if (!this.current.ready || this.navigating) return;
     this.finish("tool-change");
     this.tool = this.tool === "pen" ? "eraser" : "pen";
-    this.toolButton.textContent = this.tool === "pen" ? "\u5DE5\u5177\uFF1A\u94A2\u7B14" : "\u5DE5\u5177\uFF1A\u6574\u7B14\u6A61\u76AE";
+    this.toolButton.textContent = this.tool === "pen" ? "\u94A2\u7B14" : "\u6A61\u76AE";
+    this.toolButton.setAttribute("aria-label", this.tool === "pen" ? "\u5DE5\u5177\uFF1A\u94A2\u7B14" : "\u5DE5\u5177\uFF1A\u6574\u7B14\u6A61\u76AE");
   }
   getViewType() {
     return VIEW;
@@ -397,7 +450,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     return "pen-tool";
   }
   button(parent, text, fn) {
-    const b = parent.createEl("button", { text });
+    const b = parent.createEl("button", { text, attr: { "aria-label": text, title: text } });
     b.addEventListener("click", () => {
       void Promise.resolve().then(fn).catch((e) => this.fail(e));
     });
@@ -411,9 +464,10 @@ var ProbeView = class extends import_obsidian.ItemView {
     new import_obsidian.Notice(`InkPDF\uFF1A${message}`, 8e3);
   }
   state() {
-    if (!this.ready) return;
-    const suffix = this.active || this.erasing ? "\u64CD\u4F5C\u4E2D\uFF0C\u62AC\u7B14\u540E\u4FDD\u5B58" : this.saveError ? `\u4FDD\u5B58\u5931\u8D25\uFF1A${this.saveError}` : this.savedEditVersion === this.editVersion ? `\u5DF2\u4FDD\u5B58\u5E76\u8BFB\u56DE\u6821\u9A8C \xB7 revision ${this.store?.revision ?? 0}` : "\u5C1A\u6709\u672A\u4FDD\u5B58\u7B14\u8FF9";
-    this.status.textContent = `${this.strokes.length} \u7B14 / ${LIMITS.strokes} \xB7 ${suffix}`;
+    if (!this.current.ready) return;
+    const suffix = this.active || this.erasing ? "\u64CD\u4F5C\u4E2D\uFF0C\u62AC\u7B14\u540E\u4FDD\u5B58" : this.current.saveError ? `\u4FDD\u5B58\u5931\u8D25\uFF1A${this.current.saveError}` : this.current.savedEditVersion === this.current.editVersion ? `\u5DF2\u4FDD\u5B58\u5E76\u8BFB\u56DE\u6821\u9A8C \xB7 revision ${this.current.store?.revision ?? 0}` : "\u5C1A\u6709\u672A\u4FDD\u5B58\u7B14\u8FF9";
+    const other = [...this.pages.values()].filter((p) => p !== this.current && (p.saveError || p.editVersion !== p.savedEditVersion));
+    this.status.textContent = `${other.length ? `\u53E6 ${other.length} \u9875\u672A\u4FDD\u5B58 / \u5931\u8D25 \xB7 ` : ""}${this.current.strokes.length} \u7B14 / ${LIMITS.strokes} \xB7 ${suffix}`;
   }
   async folder(path) {
     if (!await this.app.vault.adapter.exists(path)) {
@@ -427,30 +481,34 @@ var ProbeView = class extends import_obsidian.ItemView {
   async onOpen() {
     this.contentEl.empty();
     this.contentEl.addClass("inkpdf-probe");
-    this.contentEl.createEl("h2", { text: "InkPDF \xB7 \u6700\u5C0F\u8BBE\u5907\u63A2\u9488" });
-    this.contentEl.createEl("p", { text: "\u9010\u9875 PDF \u4E66\u5199\u6D4B\u8BD5\u3002\u8BF7\u5148\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u7B14\u62AC\u8D77\u540E\u53EF\u5355\u6307\u6EDA\u52A8\uFF1B\u7B14\u843D\u4E0B\u65F6\u6682\u505C\u624B\u6307\u5BFC\u822A\u3002\u4E66\u5199\u548C\u64E6\u9664\u652F\u6301\u64A4\u9500/\u91CD\u505A\uFF0C\u6700\u591A\u4FDD\u7559 20 \u6B65\uFF08\u5F53\u524D\u9875\u6253\u5F00\u671F\u95F4\uFF09\u3002\u7B14\u4F53\u53CC\u51FB\u6682\u4E0D\u53EF\u7528\uFF0C\u8BF7\u7528\u5DE5\u5177\u6309\u94AE\u5207\u6362\u3002" });
     const controls = this.contentEl.createDiv({ cls: "inkpdf-probe-controls" });
-    this.button(controls, "\u6253\u5F00\u4ED3\u5E93 PDF", () => this.plugin.choosePdf());
-    const sourceLabel = this.contentEl.createDiv({ cls: "inkpdf-probe-source" });
+    this.button(controls, "\u6253\u5F00\u4ED3\u5E93 PDF", () => this.plugin.choosePdf()).textContent = "\u6253\u5F00";
+    const more = this.contentEl.createEl("details", { cls: "inkpdf-probe-more" });
+    more.createEl("summary", { text: "\u66F4\u591A \xB7 \u8BBE\u7F6E\u4E0E\u8BCA\u65AD" });
+    more.createEl("p", { text: "\u5173\u95ED iPad \u968F\u624B\u5199 / Scribble\u3002\u5355\u6307\u8FDE\u7EED\u6EDA\u52A8\uFF1B\u94A2\u7B14\u753B\u5B8C\u4FDD\u6301\u63A5\u89E6 1 \u79D2\u53EF\u62DF\u5408\u76F4\u7EBF\u3001\u6B63\u653E\u65B9\u6846\u6216\u5706\u3002\u64A4\u9500\u4E00\u6B21\u6062\u590D\u539F\u624B\u7ED8\uFF0C\u518D\u64A4\u9500\u5220\u9664\u3002\u539F PDF \u53EA\u8BFB\u3002\u7B14\u4F53\u53CC\u51FB\u6682\u4E0D\u652F\u6301\u3002" });
+    const options = more.createDiv({ cls: "inkpdf-probe-options" });
+    const sourceLabel = more.createDiv({ cls: "inkpdf-probe-source" });
     sourceLabel.textContent = this.pdfPath ? `${this.pdfPath} \xB7 \u539F\u6587\u4EF6\u53EA\u8BFB\uFF1B\u76F8\u540C\u5185\u5BB9\u526F\u672C\u5171\u4EAB\u9010\u9875\u7B14\u8FF9` : "\u5408\u6210 PDF \u8BBE\u5907\u6D4B\u8BD5";
-    this.prevButton = this.button(controls, "\u4E0A\u4E00\u9875", () => this.ready && this.pdfPath && this.pageNumber > 1 ? this.plugin.open(true, this.pdfPath, this.pageNumber - 1) : void 0);
+    this.prevButton = this.button(options, "\u4E0A\u4E00\u9875", () => this.jump(this.pageNumber - 1));
     this.pageLabel = controls.createEl("span", { text: "\u52A0\u8F7D\u9875\u7801\u4E2D\u2026", attr: { role: "status" } });
-    this.nextButton = this.button(controls, "\u4E0B\u4E00\u9875", () => this.ready && this.pdfPath && this.pdf && this.pageNumber < this.pdf.numPages ? this.plugin.open(true, this.pdfPath, this.pageNumber + 1) : void 0);
+    this.nextButton = this.button(options, "\u4E0B\u4E00\u9875", () => this.jump(this.pageNumber + 1));
     this.prevButton.disabled = this.nextButton.disabled = true;
-    const modeButton = this.button(controls, "\u6A21\u5F0F\uFF1A\u4E66\u5199", () => {
+    const modeButton = this.button(options, "\u6A21\u5F0F\uFF1A\u4E66\u5199", () => {
       this.finish("mode-change");
       this.pan = void 0;
       this.mode = this.mode === "write" ? "browse" : "write";
       modeButton.textContent = this.mode === "write" ? "\u6A21\u5F0F\uFF1A\u4E66\u5199" : "\u6A21\u5F0F\uFF1A\u6D4F\u89C8";
-      this.ink.style.touchAction = this.mode === "write" ? "none" : "pan-x pan-y";
-      this.scroll.style.touchAction = this.ink.style.touchAction;
+      for (const p of this.pages.values()) p.ink.style.touchAction = this.mode === "write" ? "none" : "pan-x pan-y";
+      this.scroll.style.touchAction = this.mode === "write" ? "none" : "pan-x pan-y";
     });
     this.toolButton = this.button(controls, "\u5DE5\u5177\uFF1A\u94A2\u7B14", () => this.toggleTool());
+    this.toolButton.textContent = "\u94A2\u7B14";
     this.button(controls, "\u8367\u5149\u7B14", () => {
-      if (!this.ready || this.navigating) return;
+      if (!this.current.ready || this.navigating) return;
       this.finish("tool-change");
       this.tool = "highlighter";
-      this.toolButton.textContent = "\u5DE5\u5177\uFF1A\u8367\u5149\u7B14";
+      this.toolButton.textContent = "\u8367\u5149";
+      this.toolButton.setAttribute("aria-label", "\u5DE5\u5177\uFF1A\u8367\u5149\u7B14");
       this.color = "#f4d03f";
       color.value = this.color;
     });
@@ -472,7 +530,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.undoButton = this.button(controls, "\u64A4\u9500\uFF080\uFF09", () => this.undoRedo(false));
     this.redoButton = this.button(controls, "\u91CD\u505A\uFF080\uFF09", () => this.undoRedo(true));
     this.updateHistory();
-    const gainLabel = controls.createEl("label", { cls: "inkpdf-probe-gain", text: "\u538B\u611F\u589E\u76CA " });
+    const gainLabel = options.createEl("label", { cls: "inkpdf-probe-gain", text: "\u538B\u611F\u589E\u76CA " });
     const gain = gainLabel.createEl("select", { attr: { "aria-label": "\u538B\u611F\u589E\u76CA\uFF08\u53EA\u5F71\u54CD\u65B0\u7B14\u8FF9\uFF09" } });
     for (const n of [1, 2.5, 4]) gain.createEl("option", { text: `${n}\xD7`, attr: { value: String(n) } });
     gain.value = "2.5";
@@ -480,42 +538,51 @@ var ProbeView = class extends import_obsidian.ItemView {
       this.finish("pressure-change");
       this.pressureGain = Number(gain.value);
     });
-    for (const zoom of [1, 1.5, 2]) this.button(controls, `${zoom * 100}%`, async () => {
+    for (const zoom of [1, 1.5, 2]) this.button(options, `${zoom * 100}%`, async () => {
       this.finish("zoom");
       this.zoom = zoom;
-      await this.render();
+      await this.resizePages();
     });
-    this.button(controls, "\u4FDD\u5B58 / \u91CD\u8BD5", () => this.flush());
-    this.button(controls, "\u4FDD\u5B58\u5E76\u91CD\u65B0\u8BFB\u53D6", async () => {
-      await this.flush();
-      if (!this.store) throw new Error("\u5B58\u50A8\u5C1A\u672A\u521D\u59CB\u5316");
-      const loaded = await this.store.load();
-      if (JSON.stringify(loaded) !== JSON.stringify(this.strokes)) {
-        this.ready = false;
-        throw new Error("\u91CD\u8BFB\u6570\u636E\u4E0D\u540C\uFF0C\u505C\u6B62\u7F16\u8F91");
+    this.button(options, "\u4FDD\u5B58 / \u91CD\u8BD5", () => this.flush());
+    this.button(options, "\u4FDD\u5B58\u5E76\u91CD\u65B0\u8BFB\u53D6", async () => {
+      const p = this.current;
+      this.navigating = true;
+      try {
+        await this.flush();
+        if (!p.store) throw new Error("\u5B58\u50A8\u5C1A\u672A\u521D\u59CB\u5316");
+        const loaded = await p.store.load();
+        if (JSON.stringify(loaded) !== JSON.stringify(p.strokes)) {
+          p.ready = false;
+          throw new Error("\u91CD\u8BFB\u6570\u636E\u4E0D\u540C\uFF0C\u505C\u6B62\u7F16\u8F91");
+        }
+        p.strokes = loaded;
+        p.savedCount = loaded.length;
+        p.totalPoints = loaded.reduce((n, s) => n + s.points.length, 0);
+        this.report.reopenReadback = { status: "PASS", strokeCount: loaded.length, revision: p.store.revision };
+        this.redraw(p);
+        this.state();
+        new import_obsidian.Notice(`InkPDF\uFF1A\u5DF2\u4ECE\u78C1\u76D8\u91CD\u65B0\u8BFB\u53D6 ${loaded.length} \u7B14`);
+      } finally {
+        this.navigating = false;
       }
-      this.strokes = loaded;
-      this.savedCount = loaded.length;
-      this.totalPoints = loaded.reduce((n, s) => n + s.points.length, 0);
-      this.report.reopenReadback = { status: "PASS", strokeCount: loaded.length, revision: this.store.revision };
-      this.redraw();
-      this.state();
-      new import_obsidian.Notice(`InkPDF\uFF1A\u5DF2\u4ECE\u78C1\u76D8\u91CD\u65B0\u8BFB\u53D6 ${loaded.length} \u7B14`);
     });
-    this.button(controls, "\u590D\u6D4B Worker", () => this.probeWorker());
-    this.button(controls, "\u5BFC\u51FA\u8BCA\u65AD", () => this.exportReport());
+    this.button(options, "\u590D\u6D4B Worker", () => this.probeWorker());
+    this.button(options, "\u5BFC\u51FA\u8BCA\u65AD", () => this.exportReport());
     this.status = this.contentEl.createDiv({ cls: "inkpdf-probe-status", attr: { role: "status", "aria-live": "polite" }, text: "\u521D\u59CB\u5316\u4E2D\u2026" });
-    this.capability = this.contentEl.createDiv({ cls: "inkpdf-probe-capability", text: "Worker \u68C0\u6D4B\u4E2D\u2026" });
-    this.inputStatus = this.contentEl.createDiv({ cls: "inkpdf-probe-capability", text: "\u7B14\u538B\u529B\uFF1A\u5C1A\u65E0\u91C7\u6837\u3002Scribble \u72B6\u6001\u9700\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u786E\u8BA4\u3002" });
+    this.capability = more.createDiv({ cls: "inkpdf-probe-capability", text: "Worker \u68C0\u6D4B\u4E2D\u2026" });
+    this.inputStatus = more.createDiv({ cls: "inkpdf-probe-capability", text: "\u7B14\u538B\u529B\uFF1A\u5C1A\u65E0\u91C7\u6837\u3002Scribble \u72B6\u6001\u9700\u5728\u7CFB\u7EDF\u8BBE\u7F6E\u4E2D\u786E\u8BA4\u3002" });
     this.scroll = this.contentEl.createDiv({ cls: "inkpdf-probe-scroll" });
     this.scroll.style.touchAction = "none";
-    this.sheet = this.scroll.createDiv({ cls: "inkpdf-probe-sheet" });
-    this.pdfCanvas = this.sheet.createEl("canvas");
-    this.committedInk = this.sheet.createEl("canvas", { cls: "inkpdf-probe-committed" });
-    this.ink = this.sheet.createEl("canvas", { cls: "inkpdf-probe-ink", attr: { "aria-label": "PDF \u624B\u5199\u6D4B\u8BD5\u753B\u5E03" } });
-    this.ink.style.touchAction = "none";
     this.registerDomEvent(this.scroll, "pointerdown", (e) => {
-      if (e.pointerType === "touch" || e.target === this.ink) this.down(e);
+      if (e.pointerType !== "touch") {
+        const target = [...this.pages.values()].find((p) => p.ink === e.target);
+        if (!target?.ready || !target.rendered || this.active || this.erasing) return;
+        this.activate(target);
+      }
+      this.down(e);
+    });
+    this.registerDomEvent(this.scroll, "scroll", () => {
+      void this.refreshPages().catch((e) => this.fail(e));
     });
     this.registerDomEvent(document, "pointermove", (e) => this.move(e));
     this.registerDomEvent(document, "pointerup", (e) => {
@@ -526,6 +593,7 @@ var ProbeView = class extends import_obsidian.ItemView {
         return;
       }
       if (e.pointerId !== this.active?.pointerId) return;
+      if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) >= 4) this.fitted = void 0;
       this.sample(e, true);
       this.finish("pointerup");
     });
@@ -536,7 +604,7 @@ var ProbeView = class extends import_obsidian.ItemView {
         this.finish("pointercancel");
       }
     });
-    this.registerDomEvent(this.ink, "lostpointercapture", (e) => {
+    this.registerDomEvent(this.scroll, "lostpointercapture", (e) => {
       if (e.pointerId === this.active?.pointerId || e.pointerId === this.erasing?.pointerId) this.pointerStats.lostCapture++;
     });
     this.registerDomEvent(document, "visibilitychange", () => {
@@ -555,7 +623,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       resizeTimer = window.setTimeout(() => {
         if (Math.abs(this.scroll.clientWidth - this.renderedWidth) < 1) return;
         this.finish("resize-width");
-        void this.render().catch((e) => this.fail(e));
+        void this.resizePages().catch((e) => this.fail(e));
       }, 150);
     });
     observer.observe(this.scroll);
@@ -565,7 +633,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     });
     this.register(() => {
       cancelAnimationFrame(this.frame);
-      window.clearTimeout(this.saveTimer);
+      window.clearTimeout(this.current.saveTimer);
     });
     this.report = {
       probeVersion: this.plugin.manifest.version,
@@ -586,7 +654,7 @@ var ProbeView = class extends import_obsidian.ItemView {
     try {
       await this.initialize();
     } catch (e) {
-      this.ready = false;
+      this.current.ready = false;
       if (!this.closed) this.fail(e);
     }
   }
@@ -615,92 +683,218 @@ var ProbeView = class extends import_obsidian.ItemView {
     if (this.closed) return;
     if (!this.pdfPath && this.pdf.numPages !== 1) throw new Error("\u6D4B\u8BD5\u5939\u5177\u5E94\u5F53\u53EA\u6709\u4E00\u9875");
     this.pageNumber = Math.min(this.pageNumber, this.pdf.numPages);
-    this.runId = this.pdfPath ? `pdf-${sourceHash}-p${this.pageNumber}` : this.plugin.lastRun;
-    const dir = `${ROOT}/${this.runId}`;
-    for (const p of [ROOT, dir, `${dir}/snapshots`]) await this.folder(p);
-    if (!this.pdfPath) {
-      const pdfPath = `${dir}/probe.pdf`;
-      if (!await this.app.vault.adapter.exists(pdfPath)) await this.app.vault.createBinary(pdfPath, bytes.slice().buffer);
-      const diskBytes = new Uint8Array(await this.app.vault.adapter.readBinary(pdfPath));
-      if (await sha256(diskBytes) !== sourceHash) throw new Error("\u6D4B\u8BD5 PDF \u5DF2\u6539\u53D8\uFF0C\u62D2\u7EDD\u8986\u76D6\u6216\u53E0\u52A0");
+    this.sourceHash = sourceHash;
+    await this.folder(ROOT);
+    for (let n = 1; n <= this.pdf.numPages; n++) {
+      if (this.closed) return;
+      const p = new PageState(n);
+      p.page = await this.pdf.getPage(n);
+      p.sheet = this.scroll.createDiv({ cls: "inkpdf-probe-sheet", attr: { "data-page": String(n), "aria-label": `\u7B2C ${n} \u9875` } });
+      p.pdfCanvas = p.sheet.createEl("canvas");
+      p.committedInk = p.sheet.createEl("canvas", { cls: "inkpdf-probe-committed" });
+      p.ink = p.sheet.createEl("canvas", { cls: "inkpdf-probe-ink", attr: { "aria-label": `\u7B2C ${n} \u9875\u624B\u5199\u753B\u5E03` } });
+      p.ink.style.touchAction = "none";
+      p.runId = this.pdfPath ? `pdf-${sourceHash}-p${n}` : this.plugin.lastRun;
+      this.pages.set(n, p);
+      this.layout(p);
     }
-    this.store = new ProbeStore({
-      list: async () => {
-        const { files } = await this.app.vault.adapter.list(`${dir}/snapshots`);
-        return files.filter((f) => f.endsWith(".json")).map((f) => f.slice(f.lastIndexOf("/") + 1));
-      },
-      read: (path) => this.app.vault.adapter.read(`${dir}/snapshots/${path}`),
-      create: async (path, text) => {
-        await this.app.vault.create(`${dir}/snapshots/${path}`, text);
-      }
-    }, this.runId, sourceHash);
-    this.strokes = await this.store.load();
-    this.savedCount = this.strokes.length;
-    this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
-    this.report.loadedFromDisk = { strokeCount: this.savedCount, revision: this.store.revision };
-    this.report.sourceHash = sourceHash;
-    this.page = await this.pdf.getPage(this.pageNumber);
-    await this.render();
-    if (this.closed) return;
+    if (!this.pdfPath) {
+      const dir = `${ROOT}/${this.pages.get(1).runId}`;
+      await this.folder(dir);
+      const path = `${dir}/probe.pdf`;
+      if (!await this.app.vault.adapter.exists(path)) await this.app.vault.createBinary(path, bytes.slice().buffer);
+      if (await sha256(new Uint8Array(await this.app.vault.adapter.readBinary(path))) !== sourceHash) throw new Error("\u6D4B\u8BD5 PDF \u5DF2\u6539\u53D8\uFF0C\u62D2\u7EDD\u8986\u76D6\u6216\u53E0\u52A0");
+    }
+    this.current = this.pages.get(this.pageNumber);
+    await this.loadPage(this.current);
     this.report.pdf = { status: "PASS", elapsedMs: Math.round(performance.now() - started), pages: this.pdf.numPages, selectedPage: this.pageNumber, sourceReadOnly: true };
-    this.pageLabel.textContent = `\u7B2C ${this.pageNumber} / ${this.pdf.numPages} \u9875`;
-    this.prevButton.disabled = !this.pdfPath || this.pageNumber === 1;
-    this.nextButton.disabled = !this.pdfPath || this.pageNumber === this.pdf.numPages;
-    this.plugin.lastPage = this.pageNumber;
-    await this.plugin.remember();
-    this.ready = true;
+    this.scroll.scrollTop += this.current.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top - 12;
+    this.activate(this.current);
+    await this.refreshPages();
+  }
+  layout(p) {
+    const base = p.page.getViewport({ scale: 1 });
+    const scale = Math.max(0.2, Math.min(1.2, (this.scroll.clientWidth - 24) / base.width)) * this.zoom;
+    p.viewport = p.page.getViewport({ scale });
+    p.sheet.style.width = `${p.viewport.width}px`;
+    p.sheet.style.height = `${p.viewport.height}px`;
+    this.renderedWidth = this.scroll.clientWidth;
+  }
+  loadPage(p) {
+    if (p.loading) return p.loading;
+    p.loading = (async () => {
+      if (!p.store) {
+        const dir = `${ROOT}/${p.runId}`;
+        for (const path of [dir, `${dir}/snapshots`]) await this.folder(path);
+        p.store = new ProbeStore({
+          list: async () => (await this.app.vault.adapter.list(`${dir}/snapshots`)).files.filter((f) => f.endsWith(".json")).map((f) => f.slice(f.lastIndexOf("/") + 1)),
+          read: (path) => this.app.vault.adapter.read(`${dir}/snapshots/${path}`),
+          create: async (path, text) => {
+            await this.app.vault.create(`${dir}/snapshots/${path}`, text);
+          }
+        }, p.runId, this.sourceHash);
+        try {
+          p.strokes = await p.store.load();
+        } catch (e) {
+          p.store = void 0;
+          throw e;
+        }
+        p.savedCount = p.strokes.length;
+        p.totalPoints = p.strokes.reduce((n, s) => n + s.points.length, 0);
+      }
+      if (!p.rendered) await this.render(p);
+      p.ready = true;
+      p.sheet.dataset.loaded = "true";
+    })().finally(() => {
+      p.loading = void 0;
+    });
+    return p.loading;
+  }
+  activate(p) {
+    if (!p.ready || this.active || this.erasing || this.closed) return;
+    this.current.ink?.removeAttribute("data-active");
+    this.current.committedInk?.removeAttribute("data-active");
+    this.current = p;
+    this.pageNumber = p.number;
+    p.ink.setAttribute("data-active", "true");
+    p.committedInk.setAttribute("data-active", "true");
+    this.pageLabel.textContent = `\u7B2C ${p.number} / ${this.pdf.numPages} \u9875`;
+    this.prevButton.disabled = p.number === 1;
+    this.nextButton.disabled = p.number === this.pdf.numPages;
+    this.report.pdf = { ...this.report.pdf, selectedPage: p.number };
+    this.report.sourceHash = this.sourceHash;
+    this.report.loadedFromDisk = { strokeCount: p.savedCount, revision: p.store?.revision };
+    if (this.plugin.lastPage !== p.number) {
+      this.plugin.lastPage = p.number;
+      void this.plugin.remember().catch((e) => this.fail(e));
+    }
+    this.updateHistory();
     this.state();
+  }
+  visiblePage() {
+    const mid = this.scroll.getBoundingClientRect().top + Math.min(this.scroll.clientHeight / 2, 250);
+    return [...this.pages.values()].reduce((best, p) => {
+      const distance = (q) => {
+        const r = q.sheet.getBoundingClientRect();
+        return Math.max(r.top - mid, mid - r.bottom, 0);
+      };
+      return distance(p) < distance(best) ? p : best;
+    }, this.current);
+  }
+  refreshPages() {
+    if (this.refreshTask) return this.refreshTask;
+    this.refreshTask = (async () => {
+      if (!this.pages.size || !this.report.pdf || this.closed) return;
+      let target;
+      do {
+        target = this.visiblePage();
+        await this.loadPage(target);
+        this.activate(target);
+        for (const p of this.pages.values()) {
+          if (Math.abs(p.number - target.number) > 1 && p !== this.current && p.rendered) {
+            p.rendered = false;
+            p.sheet.dataset.loaded = "false";
+            for (const c of [p.pdfCanvas, p.ink, p.committedInk]) {
+              c.width = 0;
+              c.height = 0;
+            }
+            p.page?.cleanup();
+            if (!this.navigating && !p.saveTask && !p.saveError && p.editVersion === p.savedEditVersion) {
+              p.store = void 0;
+              p.strokes = [];
+              p.history = new EditHistory();
+              p.ready = false;
+            }
+          }
+        }
+        for (const n of [target.number - 1, target.number + 1]) {
+          const p = this.pages.get(n);
+          if (p && !this.closed) await this.loadPage(p);
+        }
+      } while (!this.closed && target !== this.visiblePage());
+    })().finally(() => {
+      this.refreshTask = void 0;
+    });
+    return this.refreshTask;
+  }
+  async jump(n) {
+    const p = this.pages.get(n);
+    if (!p) return;
+    await this.flush();
+    await this.loadPage(p);
+    this.activate(p);
+    this.scroll.scrollTop += p.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top - 12;
+    await this.refreshPages();
+  }
+  async resizePages() {
+    await this.refreshTask;
+    if (!this.pages.size || !this.report.pdf || this.closed) return;
+    const offset = this.current.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top;
+    for (const p of this.pages.values()) {
+      this.layout(p);
+      p.rendered = false;
+      p.sheet.dataset.loaded = "false";
+      for (const c of [p.pdfCanvas, p.ink, p.committedInk]) {
+        c.width = 0;
+        c.height = 0;
+      }
+    }
+    this.scroll.scrollTop += this.current.sheet.getBoundingClientRect().top - this.scroll.getBoundingClientRect().top - offset;
+    await this.refreshPages();
   }
   async probeWorker() {
     const result = await workerProbe();
     this.report.worker = result;
     if (!this.closed) this.capability.textContent = `Blob module Worker + \u57FA\u7840 WASM\uFF1A${result.status}\uFF08\u4E0D\u4EE3\u8868 ORT/SIMD \u6216 OCR \u5DF2\u901A\u8FC7\uFF09`;
   }
-  async render() {
-    if (!this.page || this.closed) return;
-    const generation = ++this.renderGeneration;
-    const previous = this.renderTask;
+  async render(p = this.current) {
+    if (!p.page || this.closed) return;
+    const generation = ++p.renderGeneration;
+    const previous = p.renderTask;
     previous?.cancel();
     await previous?.promise.catch(() => void 0);
-    if (generation !== this.renderGeneration || this.closed) return;
-    const base = this.page.getViewport({ scale: 1 });
+    if (generation !== p.renderGeneration || this.closed) return;
+    const base = p.page.getViewport({ scale: 1 });
     this.renderedWidth = this.scroll.clientWidth;
     const scale = Math.max(0.2, Math.min(1.2, (this.scroll.clientWidth - 24) / base.width)) * this.zoom;
-    const viewport = this.page.getViewport({ scale });
+    const viewport = p.page.getViewport({ scale });
     pdfPoint(viewport.transform, 0, 0);
-    this.viewport = viewport;
-    this.dpr = Math.min(devicePixelRatio || 1, 2, 4096 / Math.max(viewport.width, viewport.height));
-    this.sheet.style.width = `${viewport.width}px`;
-    this.sheet.style.height = `${viewport.height}px`;
-    for (const canvas of [this.pdfCanvas, this.committedInk, this.ink]) {
-      canvas.width = Math.ceil(viewport.width * this.dpr);
-      canvas.height = Math.ceil(viewport.height * this.dpr);
+    p.viewport = viewport;
+    p.dpr = Math.min(devicePixelRatio || 1, 2, 4096 / Math.max(viewport.width, viewport.height));
+    p.sheet.style.width = `${viewport.width}px`;
+    p.sheet.style.height = `${viewport.height}px`;
+    for (const canvas of [p.pdfCanvas, p.committedInk, p.ink]) {
+      canvas.width = Math.ceil(viewport.width * p.dpr);
+      canvas.height = Math.ceil(viewport.height * p.dpr);
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
     }
-    const context = this.pdfCanvas.getContext("2d");
+    const context = p.pdfCanvas.getContext("2d");
     if (!context) throw new Error("Canvas 2D unavailable");
-    const task = this.page.render({
-      canvas: this.pdfCanvas,
+    const task = p.page.render({
+      canvas: p.pdfCanvas,
       canvasContext: context,
       viewport,
-      transform: [this.dpr, 0, 0, this.dpr, 0, 0]
+      transform: [p.dpr, 0, 0, p.dpr, 0, 0]
     });
-    this.renderTask = task;
+    p.renderTask = task;
     try {
       await task.promise;
     } catch (e) {
-      if (generation === this.renderGeneration && !this.closed) throw e;
+      if (generation === p.renderGeneration && !this.closed) throw e;
     }
-    if (generation === this.renderGeneration && !this.closed) this.redraw();
+    if (generation === p.renderGeneration && !this.closed) {
+      p.rendered = true;
+      this.redraw(p);
+    }
   }
-  context(canvas, clear = false) {
-    if (!this.viewport) return null;
+  context(canvas, clear = false, p = this.current) {
+    if (!p.viewport) return null;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (clear) ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const [a, b, c, d, e, f] = this.viewport.transform.map((n) => n * this.dpr);
+    const [a, b, c, d, e, f] = p.viewport.transform.map((n) => n * p.dpr);
     ctx.setTransform(a, b, c, d, e, f);
     ctx.strokeStyle = "#155ac4";
     ctx.fillStyle = "#155ac4";
@@ -744,18 +938,19 @@ var ProbeView = class extends import_obsidian.ItemView {
     }
     ctx.restore();
   }
-  redraw() {
-    const ctx = this.context(this.committedInk, true);
-    if (ctx) for (const s of this.strokes) this.drawStroke(ctx, s);
-    this.context(this.ink, true);
+  redraw(p = this.current) {
+    const ctx = this.context(p.committedInk, true, p);
+    if (ctx) for (const s of p.strokes) this.drawStroke(ctx, s);
+    this.context(p.ink, true, p);
+    if (p !== this.current) return;
     this.paintedPoints = 0;
     this.paintActive();
   }
   paintActive() {
     const started = performance.now();
-    const ctx = this.context(this.ink, this.active?.stroke.kind === "highlighter");
+    const ctx = this.context(this.current.ink, !!this.fitted || this.active?.stroke.kind === "highlighter");
     if (ctx && this.active) {
-      this.drawStroke(ctx, this.active.stroke, this.paintedPoints);
+      this.drawStroke(ctx, this.fitted ? { ...this.active.stroke, points: this.fitted.points } : this.active.stroke, this.fitted ? 0 : this.paintedPoints);
       this.paintedPoints = this.active.stroke.points.length;
       const p = this.active.stroke.points.at(-1)?.[2];
       this.inputStatus.textContent = `\u5F53\u524D\u539F\u59CB\u538B\u529B ${p?.toFixed(3) ?? "\u65E0"} \xB7 \u672C\u6B21\u8303\u56F4 ${this.pointerStats.pressureMin?.toFixed(3) ?? "-"}\uFF5E${this.pointerStats.pressureMax?.toFixed(3) ?? "-"} \xB7 \u589E\u76CA ${this.pressureGain}\xD7`;
@@ -786,15 +981,15 @@ var ProbeView = class extends import_obsidian.ItemView {
       }
       this.pan = { id: e.pointerId, x: e.clientX, y: e.clientY, moving: false };
       try {
-        this.ink.setPointerCapture(e.pointerId);
+        this.current.ink.setPointerCapture(e.pointerId);
       } catch {
         this.pointerStats.captureFailed++;
       }
       return;
     }
-    if (!this.ready || this.navigating || !this.viewport || this.mode !== "write" || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
+    if (!this.current.ready || this.navigating || !this.current.viewport || this.mode !== "write" || !["pen", "mouse"].includes(e.pointerType) || e.button !== 0) return;
     if (this.active || this.erasing) this.finish("superseded-down");
-    if (this.tool !== "eraser" && (this.strokes.length >= LIMITS.strokes || this.totalPoints >= LIMITS.totalPoints)) {
+    if (this.tool !== "eraser" && (this.current.strokes.length >= LIMITS.strokes || this.current.totalPoints >= LIMITS.totalPoints)) {
       new import_obsidian.Notice("\u5DF2\u8FBE\u63A2\u9488\u4E0A\u9650\uFF0C\u8BF7\u5BFC\u51FA\u8BCA\u65AD\u540E\u65B0\u5EFA\u72EC\u7ACB\u6D4B\u8BD5");
       return;
     }
@@ -805,12 +1000,12 @@ var ProbeView = class extends import_obsidian.ItemView {
     if (e.pointerType === "pen") this.pointerStats.penDown++;
     else this.pointerStats.mouseDown++;
     try {
-      this.ink.setPointerCapture(e.pointerId);
+      this.current.ink.setPointerCapture(e.pointerId);
     } catch {
       this.pointerStats.captureFailed++;
     }
     if (this.tool === "eraser") {
-      this.erasing = { pointerId: e.pointerId, before: this.strokes.slice(), last: this.eventPoint(e), changed: false };
+      this.erasing = { pointerId: e.pointerId, before: this.current.strokes.slice(), last: this.eventPoint(e), changed: false };
       this.eraseAt(e);
       this.state();
       return;
@@ -819,15 +1014,16 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.lastSampleTime = e.timeStamp;
     this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain, kind: this.tool, color: this.color, size: this.size } };
     this.sample(e);
+    this.holdShape(e);
     this.schedulePaint();
     this.state();
   }
   eventPoint(e) {
-    const rect = this.ink.getBoundingClientRect();
+    const rect = this.current.ink.getBoundingClientRect();
     return pdfPoint(
-      this.viewport.transform,
-      (e.clientX - rect.left) * this.viewport.width / rect.width,
-      (e.clientY - rect.top) * this.viewport.height / rect.height
+      this.current.viewport.transform,
+      (e.clientX - rect.left) * this.current.viewport.width / rect.width,
+      (e.clientY - rect.top) * this.current.viewport.height / rect.height
     );
   }
   endTouch(e) {
@@ -835,27 +1031,27 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.touches.delete(e.pointerId);
     if (this.pan?.id === e.pointerId) this.pan = void 0;
     try {
-      this.ink.releasePointerCapture(e.pointerId);
+      this.current.ink.releasePointerCapture(e.pointerId);
     } catch {
     }
   }
   eraseAt(e) {
     const erase = this.erasing;
-    if (!erase || !this.viewport) return;
+    if (!erase || !this.current.viewport) return;
     const to = this.eventPoint(e);
-    const radius = 10 / Math.hypot(this.viewport.transform[0], this.viewport.transform[1]);
-    const retained = this.strokes.filter((s) => !hitsStroke(s, erase.last, to, radius));
+    const radius = 10 / Math.hypot(this.current.viewport.transform[0], this.current.viewport.transform[1]);
+    const retained = this.current.strokes.filter((s) => !hitsStroke(s, erase.last, to, radius));
     erase.last = to;
-    if (retained.length === this.strokes.length) return;
-    this.strokes = retained;
+    if (retained.length === this.current.strokes.length) return;
+    this.current.strokes = retained;
     erase.changed = true;
     this.redraw();
     this.state();
   }
   sample(e, ending = false) {
     const active = this.active;
-    if (!active || !this.viewport) return;
-    if (active.stroke.points.length >= LIMITS.pointsPerStroke || this.totalPoints + active.stroke.points.length >= LIMITS.totalPoints) {
+    if (!active || !this.current.viewport) return;
+    if (active.stroke.points.length >= LIMITS.pointsPerStroke || this.current.totalPoints + active.stroke.points.length >= LIMITS.totalPoints) {
       this.finish("sample-limit");
       new import_obsidian.Notice("\u7B14\u8FF9\u70B9\u6570\u8FBE\u5230\u63A2\u9488\u4E0A\u9650\uFF0C\u5DF2\u7ED3\u675F\u8BE5\u7B14");
       return;
@@ -908,19 +1104,45 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.pointerStats.coalescedSamples += points.length;
     for (const p of points) this.sample(p);
     this.sample(e);
+    this.holdShape(e);
     this.schedulePaint();
   }
+  holdShape(e) {
+    if (!this.active || this.active.stroke.pointerType !== "pen" || this.active.stroke.kind !== "pen") return;
+    if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) < 4) return;
+    window.clearTimeout(this.shapeTimer);
+    this.shapeAnchor = [e.clientX, e.clientY];
+    if (this.fitted) {
+      this.fitted = void 0;
+      this.context(this.current.ink, true);
+      this.paintedPoints = 0;
+    }
+    const active = this.active;
+    this.shapeTimer = window.setTimeout(() => {
+      if (this.active !== active || this.closed) return;
+      this.fitted = fitShape(active.stroke.points);
+      if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) this.fitted = void 0;
+      if (this.fitted) {
+        this.context(this.current.ink, true);
+        this.schedulePaint();
+      }
+    }, 1e3);
+  }
   finish(reason) {
+    window.clearTimeout(this.shapeTimer);
+    this.shapeAnchor = void 0;
+    const fitted = reason === "pointerup" ? this.fitted : void 0;
+    this.fitted = void 0;
     if (this.erasing) {
       const erase = this.erasing;
       this.erasing = void 0;
       this.lastPenAt = performance.now();
       try {
-        this.ink.releasePointerCapture(erase.pointerId);
+        this.current.ink.releasePointerCapture(erase.pointerId);
       } catch {
       }
       if (erase.changed) {
-        this.history.record(erase.before, this.strokes);
+        this.current.history.record(erase.before, this.current.strokes);
         this.updateHistory();
         this.changed();
       }
@@ -935,97 +1157,112 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.endings.push({ reason, samples: active.stroke.points.length, durationMs: active.stroke.points.at(-1)?.[3] ?? 0 });
     this.endings = this.endings.slice(-30);
     if (active.stroke.points.length) {
-      const before = this.strokes.slice();
-      this.strokes.push(active.stroke);
-      this.history.record(before, this.strokes);
+      const before = this.current.strokes.slice();
+      this.current.strokes.push(active.stroke);
+      this.current.history.record(before, this.current.strokes);
+      if (fitted) {
+        const raw = this.current.strokes.slice();
+        active.stroke = { ...active.stroke, points: fitted.points };
+        this.current.strokes = [...before, active.stroke];
+        this.current.history.record(raw, this.current.strokes);
+        this.shapeCounts[fitted.kind] = (this.shapeCounts[fitted.kind] ?? 0) + 1;
+      }
       this.updateHistory();
-      const ctx = this.context(this.committedInk);
+      const ctx = this.context(this.current.committedInk);
       if (ctx) this.drawStroke(ctx, active.stroke);
       this.changed();
     }
     try {
-      this.ink.releasePointerCapture(active.pointerId);
+      this.current.ink.releasePointerCapture(active.pointerId);
     } catch {
     }
-    this.context(this.ink, true);
+    this.context(this.current.ink, true);
     this.paintedPoints = 0;
     this.state();
   }
   changed() {
-    this.editVersion++;
-    this.totalPoints = this.strokes.reduce((n, s) => n + s.points.length, 0);
+    this.current.editVersion++;
+    this.current.totalPoints = this.current.strokes.reduce((n, s) => n + s.points.length, 0);
     this.state();
-    if (!this.saveDue) this.saveDue = performance.now() + 1500;
-    window.clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => {
-      this.saveDue = 0;
-      if (this.active || this.erasing) return;
-      void this.save().catch((e) => this.fail(e));
-    }, Math.max(0, Math.min(250, this.saveDue - performance.now())));
+    if (!this.current.saveDue) this.current.saveDue = performance.now() + 1500;
+    window.clearTimeout(this.current.saveTimer);
+    const p = this.current;
+    this.current.saveTimer = window.setTimeout(() => {
+      p.saveDue = 0;
+      if (p === this.current && (this.active || this.erasing)) return;
+      void this.save(p).catch((e) => this.fail(e));
+    }, Math.max(0, Math.min(250, this.current.saveDue - performance.now())));
   }
   undoRedo(redo) {
-    if (!this.ready || this.navigating) return;
+    if (!this.current.ready || this.navigating) return;
     this.finish("history");
-    if (redo ? !this.history.redoDepth : !this.history.undoDepth) return;
-    this.strokes = redo ? this.history.redo(this.strokes) : this.history.undo(this.strokes);
+    if (redo ? !this.current.history.redoDepth : !this.current.history.undoDepth) return;
+    this.current.strokes = redo ? this.current.history.redo(this.current.strokes) : this.current.history.undo(this.current.strokes);
     this.updateHistory();
     this.changed();
     this.redraw();
   }
   updateHistory() {
-    this.undoButton.disabled = !this.history.undoDepth;
-    this.redoButton.disabled = !this.history.redoDepth;
-    this.undoButton.textContent = `\u64A4\u9500\uFF08${this.history.undoDepth}\uFF09`;
-    this.redoButton.textContent = `\u91CD\u505A\uFF08${this.history.redoDepth}\uFF09`;
+    this.undoButton.disabled = !this.current.history.undoDepth;
+    this.redoButton.disabled = !this.current.history.redoDepth;
+    this.undoButton.textContent = "\u21B6";
+    this.undoButton.setAttribute("aria-label", `\u64A4\u9500\uFF08${this.current.history.undoDepth}\uFF09`);
+    this.redoButton.textContent = "\u21B7";
+    this.redoButton.setAttribute("aria-label", `\u91CD\u505A\uFF08${this.current.history.redoDepth}\uFF09`);
   }
-  async save() {
-    if (this.saveTask) return this.saveTask;
-    if (!this.store) return;
-    this.saveTask = (async () => {
-      while (this.savedEditVersion < this.editVersion) {
-        if (this.active || this.erasing) break;
-        const version = this.editVersion;
+  async save(p = this.current) {
+    if (p.saveTask) return p.saveTask;
+    if (!p.store) return;
+    p.saveTask = (async () => {
+      while (p.savedEditVersion < p.editVersion) {
+        if (p === this.current && (this.active || this.erasing)) break;
+        const version = p.editVersion;
         const started = performance.now();
-        const snapshot = JSON.parse(JSON.stringify(this.strokes));
-        const result = await this.store.save(snapshot, version);
-        this.savedCount = result.count;
-        this.savedEditVersion = result.editVersion;
+        const snapshot = JSON.parse(JSON.stringify(p.strokes));
+        const result = await p.store.save(snapshot, version);
+        p.savedCount = result.count;
+        p.savedEditVersion = result.editVersion;
         this.timings.saves++;
         this.timings.maxSaveMs = Math.max(this.timings.maxSaveMs, performance.now() - started);
-        this.saveError = "";
+        p.saveError = "";
         this.state();
       }
     })().catch((e) => {
-      this.saveError = String(e);
+      p.saveError = String(e);
       this.state();
       throw e;
     }).finally(() => {
-      this.saveTask = void 0;
+      p.saveTask = void 0;
     });
-    return this.saveTask;
+    return p.saveTask;
   }
   async flush() {
     this.finish("flush");
-    window.clearTimeout(this.saveTimer);
-    this.saveDue = 0;
-    if (!this.store) return;
-    await this.save();
+    const results = await Promise.allSettled([...this.pages.values()].map((p) => {
+      window.clearTimeout(p.saveTimer);
+      p.saveDue = 0;
+      return this.save(p);
+    }));
     this.state();
+    const failure = results.find((r) => r.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
   }
   async exportReport() {
     await this.folder(ROOT);
     const report = {
       ...this.report,
       exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      runId: this.runId,
-      strokesInMemory: this.strokes.length,
-      strokesSaved: this.savedCount,
-      revision: this.store?.revision ?? 0,
-      saveError: this.saveError,
+      runId: this.current.runId,
+      pages: [...this.pages.values()].filter((p) => p.store).map((p) => ({ page: p.number, strokes: p.strokes.length, saved: p.savedCount, revision: p.store?.revision, editVersion: p.editVersion, savedEditVersion: p.savedEditVersion, saveError: p.saveError })),
+      shapeCounts: this.shapeCounts,
+      strokesInMemory: this.current.strokes.length,
+      strokesSaved: this.current.savedCount,
+      revision: this.current.store?.revision ?? 0,
+      saveError: this.current.saveError,
       pointer: this.pointerStats,
       errors: this.errors,
-      editVersion: this.editVersion,
-      savedEditVersion: this.savedEditVersion,
+      editVersion: this.current.editVersion,
+      savedEditVersion: this.current.savedEditVersion,
       inputEndings: this.endings,
       timings: this.timings,
       pressureGain: this.pressureGain,
@@ -1036,8 +1273,8 @@ var ProbeView = class extends import_obsidian.ItemView {
         scrollTop: this.scroll.scrollTop,
         maxScrollTop: this.scroll.scrollHeight - this.scroll.clientHeight
       },
-      undoDepth: this.history.undoDepth,
-      redoDepth: this.history.redoDepth,
+      undoDepth: this.current.history.undoDepth,
+      redoDepth: this.current.history.redoDepth,
       drawing: "Incremental active ink + committed canvas; finger pan while pen is up; whole-stroke eraser",
       privacy: "No handwriting coordinates, recognized text or PDF bytes included. Local file only."
     };
@@ -1048,11 +1285,17 @@ var ProbeView = class extends import_obsidian.ItemView {
   async onClose() {
     this.finish("view-close");
     this.closed = true;
-    this.renderGeneration++;
-    this.renderTask?.cancel();
-    if (this.store) await this.flush().catch((e) => this.fail(e));
-    await this.renderTask?.promise.catch(() => void 0);
-    this.page?.cleanup();
+    for (const p of this.pages.values()) {
+      p.renderGeneration++;
+      p.renderTask?.cancel();
+      window.clearTimeout(p.saveTimer);
+    }
+    await this.flush().catch((e) => this.fail(e));
+    await this.refreshTask?.catch(() => void 0);
+    for (const p of this.pages.values()) {
+      await p.renderTask?.promise.catch(() => void 0);
+      p.page?.cleanup();
+    }
     await this.pdfTask?.destroy().catch((e) => this.fail(e));
   }
 };
