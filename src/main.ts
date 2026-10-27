@@ -6,6 +6,8 @@ import { PDF_BASE64 } from './generated/fixture';
 
 const VIEW = 'inkpdf-device-probe';
 const ROOT = 'InkPDF-Probe';
+const SHAPE_HOLD_MS = 1000;
+const SHAPE_SLOP_PX = 4;
 type Viewport = { width: number; height: number; transform: number[] };
 type RenderTask = { promise: Promise<void>; cancel(): void };
 type PdfPage = { getViewport(options: { scale: number }): Viewport; render(options: unknown): RenderTask; cleanup(): void };
@@ -99,9 +101,13 @@ class ProbeView extends ItemView {
   private refreshTask?: Promise<void>;
   private sourceHash = '';
   private shapeTimer?: number;
-  private shapeAnchor?: [number, number];
+  private shapeAnchor?: { x: number; y: number; since: number; pointCount: number; attempted: boolean };
   private fitted?: ReturnType<typeof fitShape>;
   private shapeCounts: Record<string, number> = {};
+  private shapeDiagnostics = { eligibleStrokes: 0, skippedHighlighter: 0, armed: 0, movementResets: 0,
+    timerFired: 0, attempts: 0, rejected: 0, pointLimit: 0, previews: 0, canceledPreviews: 0,
+    pointerUpFallbacks: 0, maxHoldMs: 0, ignoredDwellSamples: 0, lastOutcome: 'not-started' };
+  private shapeStatus = '';
   private active?: { pointerId: number; started: number; stroke: Stroke };
   private erasing?: { pointerId: number; before: Stroke[]; last: [number, number]; changed: boolean };
   private undoButton!: HTMLButtonElement;
@@ -172,7 +178,7 @@ class ProbeView extends ItemView {
   }
   private state(): void {
     if (!this.current.ready) return;
-    const suffix = this.active || this.erasing ? '操作中，抬笔后保存' : this.current.saveError ? `保存失败：${this.current.saveError}` : this.current.savedEditVersion === this.current.editVersion ?
+    const suffix = this.active || this.erasing ? this.shapeStatus || '操作中，抬笔后保存' : this.current.saveError ? `保存失败：${this.current.saveError}` : this.current.savedEditVersion === this.current.editVersion ?
       `已保存并读回校验 · revision ${this.current.store?.revision ?? 0}` : '尚有未保存笔迹';
     const other = [...this.pages.values()].filter(p => p !== this.current && (p.saveError || p.editVersion !== p.savedEditVersion));
     this.status.textContent = `${other.length ? `另 ${other.length} 页未保存 / 失败 · ` : ''}${this.current.strokes.length} 笔 / ${LIMITS.strokes} · ${suffix}`;
@@ -273,7 +279,13 @@ class ProbeView extends ItemView {
       this.endTouch(e);
       if (e.pointerId === this.erasing?.pointerId) { this.eraseAt(e); this.finish('pointerup'); return; }
       if (e.pointerId !== this.active?.pointerId) return;
-      if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) >= 4) this.fitted = undefined;
+      if (this.shapeAnchor) {
+        if (Math.hypot(e.clientX - this.shapeAnchor.x, e.clientY - this.shapeAnchor.y) >= SHAPE_SLOP_PX) {
+          if (this.fitted) this.shapeDiagnostics.canceledPreviews++;
+          this.fitted = undefined;
+          this.shapeDiagnostics.lastOutcome = 'moved-at-lift';
+        } else this.tryShape('pointerup');
+      }
       this.sample(e, true);
       this.finish('pointerup');
     });
@@ -603,6 +615,10 @@ class ProbeView extends ItemView {
     this.paintedPoints = 0;
     this.lastSampleTime = e.timeStamp;
     this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain, kind: this.tool, color: this.color, size: this.size } };
+    if (e.pointerType === 'pen') {
+      if (this.tool === 'pen') this.shapeDiagnostics.eligibleStrokes++;
+      else this.shapeDiagnostics.skippedHighlighter++;
+    }
     this.sample(e); this.holdShape(e); this.schedulePaint(); this.state();
   }
   private eventPoint(e: PointerEvent): [number, number] {
@@ -680,20 +696,64 @@ class ProbeView extends ItemView {
   }
   private holdShape(e: PointerEvent): void {
     if (!this.active || this.active.stroke.pointerType !== 'pen' || this.active.stroke.kind !== 'pen') return;
-    if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) < 4) return;
+    if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor.x, e.clientY - this.shapeAnchor.y) < SHAPE_SLOP_PX) return;
     window.clearTimeout(this.shapeTimer);
-    this.shapeAnchor = [e.clientX, e.clientY];
-    if (this.fitted) { this.fitted = undefined; this.context(this.current.ink, true); this.paintedPoints = 0; }
+    if (this.shapeAnchor) this.shapeDiagnostics.movementResets++;
+    this.shapeAnchor = { x: e.clientX, y: e.clientY, since: performance.now(), pointCount: this.active.stroke.points.length, attempted: false };
+    this.shapeDiagnostics.armed++;
+    this.shapeDiagnostics.lastOutcome = 'waiting';
+    const previousStatus = this.shapeStatus;
+    this.shapeStatus = '停笔保持接触 1 秒可拟合';
+    if (this.fitted) {
+      this.shapeDiagnostics.canceledPreviews++;
+      this.fitted = undefined; this.context(this.current.ink, true); this.paintedPoints = 0;
+    }
     const active = this.active;
     this.shapeTimer = window.setTimeout(() => {
       if (this.active !== active || this.closed) return;
-      this.fitted = fitShape(active.stroke.points);
-      if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) this.fitted = undefined;
-      if (this.fitted) { this.context(this.current.ink, true); this.schedulePaint(); }
-    }, 1000);
+      this.shapeDiagnostics.timerFired++;
+      this.tryShape('timer');
+    }, SHAPE_HOLD_MS);
+    if (previousStatus !== this.shapeStatus) this.state();
+  }
+  private tryShape(trigger: 'timer' | 'pointerup'): void {
+    const active = this.active, anchor = this.shapeAnchor;
+    if (!active || !anchor || this.closed) return;
+    const held = performance.now() - anchor.since;
+    this.shapeDiagnostics.maxHoldMs = Math.max(this.shapeDiagnostics.maxHoldMs, Math.round(held));
+    if (anchor.attempted) return;
+    if (held < SHAPE_HOLD_MS) {
+      if (trigger === 'timer') this.shapeTimer = window.setTimeout(() => this.tryShape('timer'), Math.max(1, Math.ceil(SHAPE_HOLD_MS - held)));
+      return;
+    }
+    anchor.attempted = true;
+    this.shapeDiagnostics.attempts++;
+    if (trigger === 'pointerup') this.shapeDiagnostics.pointerUpFallbacks++;
+    // Keep raw ink for undo; stationary sensor jitter must not inflate fitted path length.
+    const geometry = active.stroke.points.slice(0, anchor.pointCount);
+    this.shapeDiagnostics.ignoredDwellSamples += active.stroke.points.length - geometry.length;
+    this.fitted = fitShape(geometry);
+    if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) {
+      this.fitted = undefined; this.shapeDiagnostics.pointLimit++;
+      this.shapeDiagnostics.lastOutcome = 'point-limit';
+      this.shapeStatus = '拟合超出点数上限，保留手绘';
+    } else if (!this.fitted) {
+      this.shapeDiagnostics.rejected++;
+      this.shapeDiagnostics.lastOutcome = 'geometry-rejected';
+      this.shapeStatus = '已检测停笔，未识别为直线、方框或圆';
+    } else {
+      this.shapeDiagnostics.previews++;
+      this.shapeDiagnostics.lastOutcome = `preview-${this.fitted.kind}`;
+      const name = { line: '直线', rectangle: '方框', circle: '圆' }[this.fitted.kind] ?? '图形';
+      this.shapeStatus = `已拟合${name}，抬笔确认；继续移动恢复手绘`;
+      this.context(this.current.ink, true); this.schedulePaint();
+    }
+    this.state();
   }
   private finish(reason: string): void {
-    window.clearTimeout(this.shapeTimer); this.shapeAnchor = undefined;
+    if (this.shapeAnchor) this.shapeDiagnostics.maxHoldMs = Math.max(this.shapeDiagnostics.maxHoldMs, Math.round(performance.now() - this.shapeAnchor.since));
+    if (reason !== 'pointerup' && this.fitted) this.shapeDiagnostics.canceledPreviews++;
+    window.clearTimeout(this.shapeTimer); this.shapeAnchor = undefined; this.shapeStatus = '';
     const fitted = reason === 'pointerup' ? this.fitted : undefined; this.fitted = undefined;
     if (this.erasing) {
       const erase = this.erasing; this.erasing = undefined;
@@ -792,6 +852,7 @@ class ProbeView extends ItemView {
     const report = { ...this.report, exportedAt: new Date().toISOString(), runId: this.current.runId,
       pages: [...this.pages.values()].filter(p => p.store).map(p => ({ page: p.number, strokes: p.strokes.length, saved: p.savedCount, revision: p.store?.revision, editVersion: p.editVersion, savedEditVersion: p.savedEditVersion, saveError: p.saveError })),
       shapeCounts: this.shapeCounts,
+      shapeDiagnostics: { ...this.shapeDiagnostics, holdMs: SHAPE_HOLD_MS, movementToleranceCssPx: SHAPE_SLOP_PX, tool: this.tool },
       strokesInMemory: this.current.strokes.length, strokesSaved: this.current.savedCount, revision: this.current.store?.revision ?? 0,
       saveError: this.current.saveError, pointer: this.pointerStats, errors: this.errors,
       editVersion: this.current.editVersion, savedEditVersion: this.current.savedEditVersion,

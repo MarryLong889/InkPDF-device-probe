@@ -183,9 +183,9 @@ try {
   await page.getByRole('button', { name: '导出诊断', exact: true }).click();
   await page.waitForFunction(() => Object.keys(window.readFiles()).filter(p => p.includes('diagnostic-')).length >= 2);
   const finalReport = await page.evaluate(() => JSON.parse(Object.entries(window.readFiles()).filter(([p]) => p.includes('diagnostic-')).at(-1)[1]));
-  assert.equal(finalReport.probeVersion, '0.0.7');
+  assert.equal(finalReport.probeVersion, '0.0.8');
   assert.equal(finalReport.strokesSaved, 21);
-  await page.screenshot({ path: '.test/probe-0.0.7.png' });
+  await page.screenshot({ path: '.test/probe-0.0.8.png' });
   // Independent two-page PDF, loaded through the vault API rather than the embedded fixture.
   const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
     '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> /Contents 5 0 R >>',
@@ -366,7 +366,7 @@ try {
   await page.getByRole('button', { name: /^重做/ }).click();
   await page.getByRole('button', { name: '保存 / 重试', exact: true }).click();
   checks.push('Highlighter has uniform 30% alpha, undo/redo preserves styles, reload preserves geometry and interior opacity, new red thin pen does not restyle old ink');
-  await page.screenshot({ path: '.test/vault-pdf-0.0.7.png' });
+  await page.screenshot({ path: '.test/vault-pdf-0.0.8.png' });
   checks.push('Invalid PDF fails without modifying source; recovery opens valid PDF; diagnostic omits source path and reports page 1');
 
   // True continuous scroll, including mixed page sizes and eviction/reload.
@@ -386,7 +386,7 @@ try {
     return {height:toolbar.getBoundingClientRect().height,available:scroll.clientHeight,details:document.querySelector('details').open};
   });
   assert.equal(compact.details,false);assert.ok(compact.height<=60);assert.ok(compact.available>750);
-  await page.screenshot({path:'.test/compact-0.0.7.png'});
+  await page.screenshot({path:'.test/compact-0.0.8.png'});
   const scrollToPage=async n=>{
     await page.evaluate(n=>{
       const v=window.mockApp.workspace.getLeavesOfType()[0].view,p=v.pages.get(n);
@@ -446,6 +446,23 @@ try {
   const endShape=async()=>page.evaluate(()=>document.dispatchEvent(new PointerEvent('pointerup',{...window.shapeEnd,buttons:0})));
   await beginShape('line');await page.waitForTimeout(300);await endShape();
   assert.ok((await viewState()).strokes.at(-1).points.length>2);
+  // Real devices keep reporting subpixel samples while the tip appears stationary.
+  for (const kind of ['line','rectangle','circle']) {
+    await beginShape(kind);
+    for (let batch=0;batch<10;batch++) {
+      await page.evaluate(()=>{
+        for(let i=0;i<40;i++) document.dispatchEvent(new PointerEvent('pointermove', {
+          ...window.shapeEnd, clientX:window.shapeEnd.clientX+(i%2?.4:-.4),
+          clientY:window.shapeEnd.clientY+(i%2?.3:-.3)
+        }));
+      });
+      await page.waitForTimeout(100);
+    }
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.fitted?.kind),kind, 'stationary jitter must not invalidate '+kind);
+    await endShape();
+  }
+  checks.push('Hundreds of subpixel dwell samples do not invalidate line, rectangle or circle fitting');
   for(const kind of ['line','rectangle','circle']){
     await beginShape(kind);await page.waitForTimeout(1150);
     assert.equal(await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.fitted?.kind),kind);
@@ -461,13 +478,37 @@ try {
   await page.evaluate(()=>document.dispatchEvent(new PointerEvent('pointermove',{...window.shapeEnd,clientY:window.shapeEnd.clientY+30})));
   assert.equal(await page.evaluate(()=>!!window.mockApp.workspace.getLeavesOfType()[0].view.fitted),false);
   await endShape();
+  // Simulate a delayed WebView timer: elapsed time is also checked at pointerup.
+  await beginShape('line');
+  await page.evaluate(()=>window.clearTimeout(window.mockApp.workspace.getLeavesOfType()[0].view.shapeTimer));
+  await page.waitForTimeout(1100);await endShape();
+  assert.equal((await viewState()).strokes.at(-1).points.length,2);
+  assert.equal(await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.shapeDiagnostics.pointerUpFallbacks),1);
+  // Timer attempt with an invalid scribble must report rejection, not silently disappear.
+  await beginShape('line');
+  await page.evaluate(()=>{
+    const v=window.mockApp.workspace.getLeavesOfType()[0].view,p=window.shapeEnd;
+    for(let i=0;i<20;i++)document.dispatchEvent(new PointerEvent('pointermove',{...p,clientX:p.clientX+(i%2?30:-30),clientY:p.clientY+i*4}));
+    window.shapeEnd={...p,clientX:p.clientX+30,clientY:p.clientY+76};
+  });
+  await page.waitForTimeout(1150);
+  assert.ok(await page.locator('.inkpdf-probe-status').textContent().then(t=>t.includes('未识别')));
+  await endShape();
+  await page.locator('.inkpdf-probe-more').evaluate(e=>e.open=true);
+  await page.getByRole('button',{name:'导出诊断',exact:true}).click();
+  const dwellReport=await page.evaluate(()=>JSON.parse(Object.entries(window.readFiles()).filter(([p])=>p.includes('diagnostic-')).at(-1)[1]));
+  assert.ok(dwellReport.shapeDiagnostics.ignoredDwellSamples>=1000);
+  assert.ok(dwellReport.shapeDiagnostics.rejected>=1);
+  assert.equal(dwellReport.shapeDiagnostics.pointerUpFallbacks,1);
+  assert.equal(JSON.stringify(dwellReport).includes('"points"'),false);
+  checks.push('Delayed timer still fits on lift; rejected geometry is visible; dwell diagnostics contain counters without handwriting coordinates');
   const shapeSaved=(await viewState()).strokes;
   await page.evaluate(()=>window.mockApp.workspace.getLeavesOfType()[0].view.flush());await page.reload();
   await page.waitForFunction(()=>window.mockApp?.workspace.getLeavesOfType()[0]?.view.current.ready);
   assert.deepEqual((await viewState()).strokes,shapeSaved);
   checks.push('Pencil dwell: early lift stays freehand, one-second line/rectangle/circle fit, movement cancels preview, undo restores original, redo and restart preserve fitted geometry');
   assert.equal(failures.length, 0, failures.join('\n'));
-  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.7', status: 'PASS', browser: await browser.version(), checks,
+  await writeFile('.test/browser-results.json', JSON.stringify({ probeVersion: '0.0.8', status: 'PASS', browser: await browser.version(), checks,
     notRun: ['real Obsidian', 'iPad WKWebView', 'Apple Pencil', 'OCR', 'GitHub sync'] }, null, 2));
   console.log(checks.join('\n'));
 } finally {

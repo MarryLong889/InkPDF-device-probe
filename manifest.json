@@ -1,7 +1,7 @@
 {
   "id": "inkpdf-device-probe",
   "name": "InkPDF Device Probe",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "minAppVersion": "1.11.4",
   "description": "Continuous PDF ink, Pencil hold-to-fit shapes, per-page saves and device diagnostics. Test vault only.",
   "author": "InkPDF",

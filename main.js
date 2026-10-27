@@ -254,6 +254,8 @@ var PDF_BASE64 = "JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbn
 // src/main.ts
 var VIEW = "inkpdf-device-probe";
 var ROOT = "InkPDF-Probe";
+var SHAPE_HOLD_MS = 1e3;
+var SHAPE_SLOP_PX = 4;
 var InkPDFProbe = class extends import_obsidian.Plugin {
   lastRun = null;
   lastPdfPath = null;
@@ -374,6 +376,23 @@ var ProbeView = class extends import_obsidian.ItemView {
   shapeAnchor;
   fitted;
   shapeCounts = {};
+  shapeDiagnostics = {
+    eligibleStrokes: 0,
+    skippedHighlighter: 0,
+    armed: 0,
+    movementResets: 0,
+    timerFired: 0,
+    attempts: 0,
+    rejected: 0,
+    pointLimit: 0,
+    previews: 0,
+    canceledPreviews: 0,
+    pointerUpFallbacks: 0,
+    maxHoldMs: 0,
+    ignoredDwellSamples: 0,
+    lastOutcome: "not-started"
+  };
+  shapeStatus = "";
   active;
   erasing;
   undoButton;
@@ -465,7 +484,7 @@ var ProbeView = class extends import_obsidian.ItemView {
   }
   state() {
     if (!this.current.ready) return;
-    const suffix = this.active || this.erasing ? "\u64CD\u4F5C\u4E2D\uFF0C\u62AC\u7B14\u540E\u4FDD\u5B58" : this.current.saveError ? `\u4FDD\u5B58\u5931\u8D25\uFF1A${this.current.saveError}` : this.current.savedEditVersion === this.current.editVersion ? `\u5DF2\u4FDD\u5B58\u5E76\u8BFB\u56DE\u6821\u9A8C \xB7 revision ${this.current.store?.revision ?? 0}` : "\u5C1A\u6709\u672A\u4FDD\u5B58\u7B14\u8FF9";
+    const suffix = this.active || this.erasing ? this.shapeStatus || "\u64CD\u4F5C\u4E2D\uFF0C\u62AC\u7B14\u540E\u4FDD\u5B58" : this.current.saveError ? `\u4FDD\u5B58\u5931\u8D25\uFF1A${this.current.saveError}` : this.current.savedEditVersion === this.current.editVersion ? `\u5DF2\u4FDD\u5B58\u5E76\u8BFB\u56DE\u6821\u9A8C \xB7 revision ${this.current.store?.revision ?? 0}` : "\u5C1A\u6709\u672A\u4FDD\u5B58\u7B14\u8FF9";
     const other = [...this.pages.values()].filter((p) => p !== this.current && (p.saveError || p.editVersion !== p.savedEditVersion));
     this.status.textContent = `${other.length ? `\u53E6 ${other.length} \u9875\u672A\u4FDD\u5B58 / \u5931\u8D25 \xB7 ` : ""}${this.current.strokes.length} \u7B14 / ${LIMITS.strokes} \xB7 ${suffix}`;
   }
@@ -593,7 +612,13 @@ var ProbeView = class extends import_obsidian.ItemView {
         return;
       }
       if (e.pointerId !== this.active?.pointerId) return;
-      if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) >= 4) this.fitted = void 0;
+      if (this.shapeAnchor) {
+        if (Math.hypot(e.clientX - this.shapeAnchor.x, e.clientY - this.shapeAnchor.y) >= SHAPE_SLOP_PX) {
+          if (this.fitted) this.shapeDiagnostics.canceledPreviews++;
+          this.fitted = void 0;
+          this.shapeDiagnostics.lastOutcome = "moved-at-lift";
+        } else this.tryShape("pointerup");
+      }
       this.sample(e, true);
       this.finish("pointerup");
     });
@@ -1013,6 +1038,10 @@ var ProbeView = class extends import_obsidian.ItemView {
     this.paintedPoints = 0;
     this.lastSampleTime = e.timeStamp;
     this.active = { pointerId: e.pointerId, started: e.timeStamp, stroke: { id: uniqueId(), pointerType: e.pointerType, interrupted: false, points: [], pressureGain: this.pressureGain, kind: this.tool, color: this.color, size: this.size } };
+    if (e.pointerType === "pen") {
+      if (this.tool === "pen") this.shapeDiagnostics.eligibleStrokes++;
+      else this.shapeDiagnostics.skippedHighlighter++;
+    }
     this.sample(e);
     this.holdShape(e);
     this.schedulePaint();
@@ -1109,10 +1138,16 @@ var ProbeView = class extends import_obsidian.ItemView {
   }
   holdShape(e) {
     if (!this.active || this.active.stroke.pointerType !== "pen" || this.active.stroke.kind !== "pen") return;
-    if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor[0], e.clientY - this.shapeAnchor[1]) < 4) return;
+    if (this.shapeAnchor && Math.hypot(e.clientX - this.shapeAnchor.x, e.clientY - this.shapeAnchor.y) < SHAPE_SLOP_PX) return;
     window.clearTimeout(this.shapeTimer);
-    this.shapeAnchor = [e.clientX, e.clientY];
+    if (this.shapeAnchor) this.shapeDiagnostics.movementResets++;
+    this.shapeAnchor = { x: e.clientX, y: e.clientY, since: performance.now(), pointCount: this.active.stroke.points.length, attempted: false };
+    this.shapeDiagnostics.armed++;
+    this.shapeDiagnostics.lastOutcome = "waiting";
+    const previousStatus = this.shapeStatus;
+    this.shapeStatus = "\u505C\u7B14\u4FDD\u6301\u63A5\u89E6 1 \u79D2\u53EF\u62DF\u5408";
     if (this.fitted) {
+      this.shapeDiagnostics.canceledPreviews++;
       this.fitted = void 0;
       this.context(this.current.ink, true);
       this.paintedPoints = 0;
@@ -1120,17 +1155,52 @@ var ProbeView = class extends import_obsidian.ItemView {
     const active = this.active;
     this.shapeTimer = window.setTimeout(() => {
       if (this.active !== active || this.closed) return;
-      this.fitted = fitShape(active.stroke.points);
-      if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) this.fitted = void 0;
-      if (this.fitted) {
-        this.context(this.current.ink, true);
-        this.schedulePaint();
-      }
-    }, 1e3);
+      this.shapeDiagnostics.timerFired++;
+      this.tryShape("timer");
+    }, SHAPE_HOLD_MS);
+    if (previousStatus !== this.shapeStatus) this.state();
+  }
+  tryShape(trigger) {
+    const active = this.active, anchor = this.shapeAnchor;
+    if (!active || !anchor || this.closed) return;
+    const held = performance.now() - anchor.since;
+    this.shapeDiagnostics.maxHoldMs = Math.max(this.shapeDiagnostics.maxHoldMs, Math.round(held));
+    if (anchor.attempted) return;
+    if (held < SHAPE_HOLD_MS) {
+      if (trigger === "timer") this.shapeTimer = window.setTimeout(() => this.tryShape("timer"), Math.max(1, Math.ceil(SHAPE_HOLD_MS - held)));
+      return;
+    }
+    anchor.attempted = true;
+    this.shapeDiagnostics.attempts++;
+    if (trigger === "pointerup") this.shapeDiagnostics.pointerUpFallbacks++;
+    const geometry = active.stroke.points.slice(0, anchor.pointCount);
+    this.shapeDiagnostics.ignoredDwellSamples += active.stroke.points.length - geometry.length;
+    this.fitted = fitShape(geometry);
+    if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) {
+      this.fitted = void 0;
+      this.shapeDiagnostics.pointLimit++;
+      this.shapeDiagnostics.lastOutcome = "point-limit";
+      this.shapeStatus = "\u62DF\u5408\u8D85\u51FA\u70B9\u6570\u4E0A\u9650\uFF0C\u4FDD\u7559\u624B\u7ED8";
+    } else if (!this.fitted) {
+      this.shapeDiagnostics.rejected++;
+      this.shapeDiagnostics.lastOutcome = "geometry-rejected";
+      this.shapeStatus = "\u5DF2\u68C0\u6D4B\u505C\u7B14\uFF0C\u672A\u8BC6\u522B\u4E3A\u76F4\u7EBF\u3001\u65B9\u6846\u6216\u5706";
+    } else {
+      this.shapeDiagnostics.previews++;
+      this.shapeDiagnostics.lastOutcome = `preview-${this.fitted.kind}`;
+      const name = { line: "\u76F4\u7EBF", rectangle: "\u65B9\u6846", circle: "\u5706" }[this.fitted.kind] ?? "\u56FE\u5F62";
+      this.shapeStatus = `\u5DF2\u62DF\u5408${name}\uFF0C\u62AC\u7B14\u786E\u8BA4\uFF1B\u7EE7\u7EED\u79FB\u52A8\u6062\u590D\u624B\u7ED8`;
+      this.context(this.current.ink, true);
+      this.schedulePaint();
+    }
+    this.state();
   }
   finish(reason) {
+    if (this.shapeAnchor) this.shapeDiagnostics.maxHoldMs = Math.max(this.shapeDiagnostics.maxHoldMs, Math.round(performance.now() - this.shapeAnchor.since));
+    if (reason !== "pointerup" && this.fitted) this.shapeDiagnostics.canceledPreviews++;
     window.clearTimeout(this.shapeTimer);
     this.shapeAnchor = void 0;
+    this.shapeStatus = "";
     const fitted = reason === "pointerup" ? this.fitted : void 0;
     this.fitted = void 0;
     if (this.erasing) {
@@ -1255,6 +1325,7 @@ var ProbeView = class extends import_obsidian.ItemView {
       runId: this.current.runId,
       pages: [...this.pages.values()].filter((p) => p.store).map((p) => ({ page: p.number, strokes: p.strokes.length, saved: p.savedCount, revision: p.store?.revision, editVersion: p.editVersion, savedEditVersion: p.savedEditVersion, saveError: p.saveError })),
       shapeCounts: this.shapeCounts,
+      shapeDiagnostics: { ...this.shapeDiagnostics, holdMs: SHAPE_HOLD_MS, movementToleranceCssPx: SHAPE_SLOP_PX, tool: this.tool },
       strokesInMemory: this.current.strokes.length,
       strokesSaved: this.current.savedCount,
       revision: this.current.store?.revision ?? 0,
