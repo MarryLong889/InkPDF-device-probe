@@ -1,8 +1,8 @@
 # InkPDF 最小设备探针
 
-当前版本 0.0.8（待 iPad 验收）：修复停笔抖动导致拟合被拒绝，增加触发诊断和抬笔补检；保留连续滚动和单行工具栏。沿用逐页独立保存和只读原 PDF；Apple Pencil 笔体双击继续暂缓。
+当前版本 0.0.9（待 iPad 验收）：拟合前对密集采样去噪，记录具体几何拒绝原因；保留连续滚动和单行工具栏。沿用逐页独立保存和只读原 PDF；Apple Pencil 笔体双击继续暂缓。
 
-本阶段 iPad 测试步骤：[docs/SHAPE_FIX_0.0.8.md](docs/SHAPE_FIX_0.0.8.md)。0.0.5 实机基线：[docs/IPAD_ACCEPTANCE_0.0.5.md](docs/IPAD_ACCEPTANCE_0.0.5.md)。
+本阶段 iPad 测试步骤：[docs/GEOMETRY_FIX_0.0.9.md](docs/GEOMETRY_FIX_0.0.9.md)。0.0.5 实机基线：[docs/IPAD_ACCEPTANCE_0.0.5.md](docs/IPAD_ACCEPTANCE_0.0.5.md)。
 
 ## 构建与检查
 

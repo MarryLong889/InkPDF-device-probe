@@ -1,6 +1,6 @@
 import { ItemView, Notice, Plugin, WorkspaceLeaf, loadPdfJs, apiVersion, FuzzySuggestModal, TFile } from 'obsidian';
 import { LIMITS, Point, ProbeStore, Stroke, pdfPoint, sha256, validId, uniqueId, strokeWidth, hitsStroke, EditHistory } from './core';
-import { fitShape } from './shapes';
+import { fitShape, ShapeFitMetrics } from './shapes';
 import { workerProbe } from './capabilities';
 import { PDF_BASE64 } from './generated/fixture';
 
@@ -108,6 +108,7 @@ class ProbeView extends ItemView {
     timerFired: 0, attempts: 0, rejected: 0, pointLimit: 0, previews: 0, canceledPreviews: 0,
     pointerUpFallbacks: 0, maxHoldMs: 0, ignoredDwellSamples: 0, lastOutcome: 'not-started' };
   private shapeStatus = '';
+  private shapeFitAttempts: ShapeFitMetrics[] = [];
   private active?: { pointerId: number; started: number; stroke: Stroke };
   private erasing?: { pointerId: number; before: Stroke[]; last: [number, number]; changed: boolean };
   private undoButton!: HTMLButtonElement;
@@ -732,7 +733,10 @@ class ProbeView extends ItemView {
     // Keep raw ink for undo; stationary sensor jitter must not inflate fitted path length.
     const geometry = active.stroke.points.slice(0, anchor.pointCount);
     this.shapeDiagnostics.ignoredDwellSamples += active.stroke.points.length - geometry.length;
-    this.fitted = fitShape(geometry);
+    const metrics: ShapeFitMetrics = { page: this.pageNumber, trigger, pipeline: 'simplify-1pdf-resample64-v1' };
+    this.fitted = fitShape(geometry, metrics);
+    this.shapeFitAttempts.push(metrics);
+    this.shapeFitAttempts = this.shapeFitAttempts.slice(-10);
     if (this.fitted && this.current.totalPoints + this.fitted.points.length > LIMITS.totalPoints) {
       this.fitted = undefined; this.shapeDiagnostics.pointLimit++;
       this.shapeDiagnostics.lastOutcome = 'point-limit';
@@ -740,7 +744,14 @@ class ProbeView extends ItemView {
     } else if (!this.fitted) {
       this.shapeDiagnostics.rejected++;
       this.shapeDiagnostics.lastOutcome = 'geometry-rejected';
-      this.shapeStatus = '已检测停笔，未识别为直线、方框或圆';
+      const reasons: Record<string, string> = {
+        'too-few-samples': '采样点不足', 'too-short': '图形太短', 'too-complex': '轨迹过于复杂',
+        'not-line-and-too-narrow': '不是直线，闭合图形太窄',
+        'not-line-and-not-closed': '不是直线，图形未闭合',
+        'rectangle-and-circle-proportions': '方框或圆的比例不符',
+        'rectangle-and-circle-deviation': '边缘偏离方框或圆', 'incomplete-circle': '圆周不完整'
+      };
+      this.shapeStatus = `已检测停笔，未识别：${reasons[metrics.reason] ?? '几何不匹配'}`;
     } else {
       this.shapeDiagnostics.previews++;
       this.shapeDiagnostics.lastOutcome = `preview-${this.fitted.kind}`;
@@ -852,6 +863,7 @@ class ProbeView extends ItemView {
     const report = { ...this.report, exportedAt: new Date().toISOString(), runId: this.current.runId,
       pages: [...this.pages.values()].filter(p => p.store).map(p => ({ page: p.number, strokes: p.strokes.length, saved: p.savedCount, revision: p.store?.revision, editVersion: p.editVersion, savedEditVersion: p.savedEditVersion, saveError: p.saveError })),
       shapeCounts: this.shapeCounts,
+      shapeFitAttempts: this.shapeFitAttempts,
       shapeDiagnostics: { ...this.shapeDiagnostics, holdMs: SHAPE_HOLD_MS, movementToleranceCssPx: SHAPE_SLOP_PX, tool: this.tool },
       strokesInMemory: this.current.strokes.length, strokesSaved: this.current.savedCount, revision: this.current.store?.revision ?? 0,
       saveError: this.current.saveError, pointer: this.pointerStats, errors: this.errors,
