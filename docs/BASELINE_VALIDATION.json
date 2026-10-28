@@ -1,0 +1,38 @@
+{
+  "success": true,
+  "numTotalTests": 769,
+  "numPassedTests": 767,
+  "numFailedTests": 0,
+  "numPendingTests": 2,
+  "skipped": [
+    "the classifier against a real library reaches a decision on every PDF it finds, without throwing",
+    "the classifier against a real library appends to every book it accepts and pdf.js still reads the result"
+  ],
+  "upstreamCommit": "80708d841457683abb58831b2a17ab97a7b201d4",
+  "unalteredSourceFiles": 61,
+  "version": "0.0.10",
+  "notVerified": [
+    "iPad WKWebView",
+    "Apple Pencil",
+    "BRAT installation",
+    "real Obsidian PDF write/reopen",
+    "OCR"
+  ],
+  "assets": [
+    {
+      "name": "main.js",
+      "bytes": 2520067,
+      "sha256": "f822111fef5450ca0ea3dd176ba6a468ad39703e1f4ae761ac188f7d99a964af"
+    },
+    {
+      "name": "manifest.json",
+      "bytes": 313,
+      "sha256": "c49cf41060e3e6f373c719cf2ec982491e5f6ab0c6097d60d38ea31f1552a665"
+    },
+    {
+      "name": "styles.css",
+      "bytes": 40017,
+      "sha256": "b14b10c7e03fc6e2b3b3cf8917df165f0501572e5ffdd4775d6dfe87a815b776"
+    }
+  ]
+}

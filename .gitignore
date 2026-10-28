@@ -1,3 +1,6 @@
 node_modules/
 .test/
-dist/
+.local-backup/
+*.map
+data.json
+.DS_Store

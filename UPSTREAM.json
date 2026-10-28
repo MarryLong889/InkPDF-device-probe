@@ -1,0 +1,252 @@
+{
+  "repository": "https://github.com/Bluewolf135/Inkling",
+  "commit": "80708d841457683abb58831b2a17ab97a7b201d4",
+  "version": "1.0.1",
+  "license": "MIT",
+  "sourceFiles": [
+    {
+      "path": "src/annotate/controller.ts",
+      "sha256": "bf848345c45740616351d569a95c3f39175d3114f03f9b080be16feb6fb1a887"
+    },
+    {
+      "path": "src/annotate/eraser.ts",
+      "sha256": "068c0259269e7ca0cb9169df164b31d9cde574c43c26bf7db09b041608fb804d"
+    },
+    {
+      "path": "src/annotate/geometry.ts",
+      "sha256": "4dc69f9db9910aae9e96c16bb83053db6261e9ec0ea71d88b7885aaa3471644b"
+    },
+    {
+      "path": "src/annotate/history.ts",
+      "sha256": "7f49516ff208024540a18471ba619fd0bbfd408d7f4ab1240c7afb6475bc0670"
+    },
+    {
+      "path": "src/annotate/id.ts",
+      "sha256": "84e9351b41745c0003f1a9d4dced97c09ce69151b77ed6d3af1bc0fa4806584b"
+    },
+    {
+      "path": "src/annotate/index.ts",
+      "sha256": "985d8e339ecf3e1c93640de5dc1b78c97949bd46ae8b32a7742af56a07e5184f"
+    },
+    {
+      "path": "src/annotate/pointer.ts",
+      "sha256": "5540073e6b23ea5721ecde0a642cbb0cc1f5a15b9454aaf2c46dbb4106b1aa5e"
+    },
+    {
+      "path": "src/annotate/recognize.ts",
+      "sha256": "3eaae1988990218f2b099c0ce7baa390a66157529aa875aa22ab633319c72225"
+    },
+    {
+      "path": "src/annotate/render.ts",
+      "sha256": "542ccf52ed7f0f7942433df9b8a0afcff45c7707696091b621f35316cf229d93"
+    },
+    {
+      "path": "src/annotate/simplify.ts",
+      "sha256": "c172f49af900a521f8404e03392513a4439d23fdee4de66254758dbfdc923a78"
+    },
+    {
+      "path": "src/annotate/store.ts",
+      "sha256": "bd4ad0b67e551bc6bc5ffe95c40206e11a9162725236d88a6164f2ca65689aa4"
+    },
+    {
+      "path": "src/annotate/stroke.ts",
+      "sha256": "0aa8db74690910ea90022259bd7036ec24a6cad2a14eeb29ca9be003459c151c"
+    },
+    {
+      "path": "src/annotate/toolbar.ts",
+      "sha256": "a82b80eaa0421246d12a425897c03e02aa9a85f9356c8ecb298f6e66e5a195fc"
+    },
+    {
+      "path": "src/annotate/toolState.ts",
+      "sha256": "24a54851e05f1b54c7e567ad9b956a7e34881b2cb276e93ae0569195df1fab40"
+    },
+    {
+      "path": "src/annotate/types.ts",
+      "sha256": "2b9855ca63e62248954d09ef88c92b10401698829735b9c03a2fe35d25b00cb5"
+    },
+    {
+      "path": "src/binary.ts",
+      "sha256": "32653cb53169a9368867cb8ce162294ed158e60c7afabac2edd01e4426137455"
+    },
+    {
+      "path": "src/extract/extract.ts",
+      "sha256": "f53afebfe8e81f65fd049bdf3a54dec9c13dfab94506257fe7d407e0fef52b33"
+    },
+    {
+      "path": "src/extract/extractFormat.ts",
+      "sha256": "48ed24d72f2f1498876ba9de0ac0d262d41bf9b1f2a02852c19805ac05d331be"
+    },
+    {
+      "path": "src/icon.ts",
+      "sha256": "28276ad747abc72d489773dc306e8c8e5e0dac6ff5ce7a808b558eade5502876"
+    },
+    {
+      "path": "src/inlineWorkers.d.ts",
+      "sha256": "248529d87321976239b29704949916ba3fdc0b8843c855a86caa28996a57a007"
+    },
+    {
+      "path": "src/main.ts",
+      "sha256": "e918b4b7e7274b03d10a4fa21d7602fe0e2703053f8827c84893668fbd7b939c"
+    },
+    {
+      "path": "src/markdown/compactInkBlocks.ts",
+      "sha256": "f4eca16d082061c157c8cad9901f171e837aaff95e345f7ae0004dcf63c244c1"
+    },
+    {
+      "path": "src/markdown/inkBlock.ts",
+      "sha256": "16e0c2913eab95ed9a278e1535d0297db400e3a5ff1186d73ebcb383de0dd315"
+    },
+    {
+      "path": "src/markdown/inkBlockFormat.ts",
+      "sha256": "6c754805791d18913781c576a20bd4aeae6fd23005064e5befb681097f6a0853"
+    },
+    {
+      "path": "src/markdown/inkBlockStorage.ts",
+      "sha256": "7ad253eb3580938ae5710a61b18bedb40d2ce79ce67849353949e1d9ee0dad39"
+    },
+    {
+      "path": "src/markdown/inkFence.ts",
+      "sha256": "3bd47d1455a55f9643c9bfe24ef1e2d56876ac0e677ed199c7ecb69f4046f7fc"
+    },
+    {
+      "path": "src/markdown/inkFile.ts",
+      "sha256": "b877a4f5231eb25f6f658a1d0542e35a396d1c23bc9463f7ede15a03ee67a6cc"
+    },
+    {
+      "path": "src/markdown/inkFileCodec.ts",
+      "sha256": "5ff0d92a5196b0083381294492b3adaf186cfa0276373017b79a01803b2da92f"
+    },
+    {
+      "path": "src/markdown/inkFilePath.ts",
+      "sha256": "feb1b995b04eb2f38c8229dae17c57fff61293d5d599098a770255376e5e9455"
+    },
+    {
+      "path": "src/markdown/inkFileStorage.ts",
+      "sha256": "bdfc70e320ccfe5c564abc9cd9b8e4d93d191690561fc415a18481f052981d6d"
+    },
+    {
+      "path": "src/markdown/inkFileStore.ts",
+      "sha256": "48a00f2035e5eec9ae3a66fbe48279e0f5f7770bc5af720a1bb390495c460e39"
+    },
+    {
+      "path": "src/markdown/inkFileVaultIO.ts",
+      "sha256": "ff0793230de677e6081ca3203ed54c9b84c2eb7fc5563458842de0c105650aeb"
+    },
+    {
+      "path": "src/markdown/inkRecovery.ts",
+      "sha256": "763c54bffcc7acc3988d49d7f162599a580a17ffe66f365a82ce96120440077f"
+    },
+    {
+      "path": "src/markdown/inNoteStorage.ts",
+      "sha256": "16fc6856c2cc6d74a329d5340648f6c0ba45a5e013cbdb6cc5896b2567449815"
+    },
+    {
+      "path": "src/markdown/mergeInkBlocks.ts",
+      "sha256": "b0d53202391029d1270eaa8d5f1cb39871a36a89323421fdca790c796277bff7"
+    },
+    {
+      "path": "src/noteCreation.ts",
+      "sha256": "094c1975e74cc885a89f6597e2098e2975106db7af07df924bfec168359641e2"
+    },
+    {
+      "path": "src/pdf/annotationFormat.ts",
+      "sha256": "f6d47f504ed42d9c3ea7dee45357ffb718e5ada0bc0b382a486194a299bc0a49"
+    },
+    {
+      "path": "src/pdf/annotationSync.ts",
+      "sha256": "38dfb78d1cdda56465a40acdefe38a26e67f3ab7076289c4ff46f4097a9b0cd8"
+    },
+    {
+      "path": "src/pdf/annotationWriter.worker.ts",
+      "sha256": "ef16307483646d0f2bc61c49817ae8909b37dd0d80ddbe86a40fd6ace22536e1"
+    },
+    {
+      "path": "src/pdf/annotationWriterClient.ts",
+      "sha256": "215ad4f73ebb092aa32f4f518495586fa1a74090cbc29ee08fc81fe29c0d93fb"
+    },
+    {
+      "path": "src/pdf/annotationWriterCore.ts",
+      "sha256": "ec921e4e544f35dd703c7ab1c2af9bc418cd5f63c1ecdfbce107f48f3bc4d14e"
+    },
+    {
+      "path": "src/pdf/annotationWriterProtocol.ts",
+      "sha256": "be9fc7a03f7c0f1dce55963935e854e88bf0339fedf103dac2253924493cc0fa"
+    },
+    {
+      "path": "src/pdf/appendUpdate.ts",
+      "sha256": "761f6a1fc666b25563eb715fb3579c97491843063769b60c9d9cf4e300fdcae0"
+    },
+    {
+      "path": "src/pdf/changeSet.ts",
+      "sha256": "66558e0bf4b4c6dc5d163a6bb043c6713dddacf870f6d4a7c87e5cc9627d8d74"
+    },
+    {
+      "path": "src/pdf/compaction.ts",
+      "sha256": "63573015f4c7dfcc92321f2f62453593600883daf2eb69e645c4fccb97eb81f5"
+    },
+    {
+      "path": "src/pdf/compatibility.ts",
+      "sha256": "676f8e4d3bb943e60255da9abf8e1ee73b7cdc383d60c28c968301c34497f7e8"
+    },
+    {
+      "path": "src/pdf/contentStream.ts",
+      "sha256": "e7d25e855b85243084c5062acaea6719beb1b21c1cad879f818acbe70b088fbd"
+    },
+    {
+      "path": "src/pdf/fingerprint.ts",
+      "sha256": "c373595618a535fc090b6e9f74b84be615b37fb42a0834f8124fa43c4a6a2155"
+    },
+    {
+      "path": "src/pdf/incrementalClassify.ts",
+      "sha256": "66b2e046c3c0c333c468eeed3c0a7cbfc1e9ce2330739014dee51145c648748a"
+    },
+    {
+      "path": "src/pdf/incrementalSave.ts",
+      "sha256": "295d4a2011c79d02d628742683a27354c7917c3d47e4fec1f4d00a9137196ba5"
+    },
+    {
+      "path": "src/pdf/navigation.ts",
+      "sha256": "483262bb70a540377dc1af29f0de74de57c66cf670b71115f88bcbfdc3337a11"
+    },
+    {
+      "path": "src/pdf/popoverPlacement.ts",
+      "sha256": "48caf63da6fc0fc42ebd82a727ecfa79453dba6ff5af2e2569112855b164f67d"
+    },
+    {
+      "path": "src/pdf/renderScale.ts",
+      "sha256": "b1594236b12176a8e63e36da200c9b2a41a6ba80f5a244c2014f585749f15b65"
+    },
+    {
+      "path": "src/pdf/saveCadence.ts",
+      "sha256": "b0df499b012828f24593af9e8d4252e475dc3d0c87378b87d639b8c44789b089"
+    },
+    {
+      "path": "src/pdf/textLines.ts",
+      "sha256": "7f8814082472959917fcb2b6b4368c43328c390ae9e908cec509e4f361619bed"
+    },
+    {
+      "path": "src/pdf/xrefScan.ts",
+      "sha256": "6895075bb06569b024b9b448f43979ef8c2006a0421a853df2feafa04e10258d"
+    },
+    {
+      "path": "src/pdfView.ts",
+      "sha256": "e3be0c7b26bc6cdf47728239d207c263e79227e63cb5637aab54a91c7ee7bf64"
+    },
+    {
+      "path": "src/settings.ts",
+      "sha256": "5bad51771da5fef4ee4c9b257d1fc414d585c865e1ba8ddd2fd4ec7ba281ddfb"
+    },
+    {
+      "path": "src/settingsTab.ts",
+      "sha256": "f148861928c1c965d394f8aa7da9fa2818f629430e4b09be8a309ec4c982db03"
+    },
+    {
+      "path": "src/templates.ts",
+      "sha256": "1040bd9b75fbf6cb0b76dc9fb2f1a647d77d24eccbc8944188165cd619732d2b"
+    },
+    {
+      "path": "src/vaultWrite.ts",
+      "sha256": "7f5dce8ae37166dd5082a8bf594b700ef3784817fa8068ce8ccc045b97c77f3b"
+    }
+  ]
+}

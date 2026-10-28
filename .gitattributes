@@ -1,1 +1,7 @@
-*.pdf binary
+# Preserve upstream source bytes for UPSTREAM.json verification.
+src/** -text
+# Generated PDF serializer strings contain meaningful trailing spaces.
+main.js -whitespace
+main.js -text
+manifest.json -text
+styles.css -text

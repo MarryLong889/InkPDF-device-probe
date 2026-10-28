@@ -54,11 +54,12 @@ jobs:
             exit 1
           fi
           cat > "$RUNNER_TEMP/inkpdf-release-notes.md" <<'NOTES'
-          InkPDF minimal device probe for PDF rendering, Pencil input, save/reopen and Worker tests.
+          InkPDF based on the full Inkling plugin source (MIT, William DeStefano).
 
           Install with BRAT using MarryLong889/InkPDF-device-probe.
           Only main.js, manifest.json and styles.css are installed.
-          Use a test vault. This is not the complete annotation/OCR plugin; iPad validation is still required.
+          This version writes annotations directly into the PDF. Test on a copy first.
+          Previous InkPDF-Probe sidecar ink is not automatically imported. Handwriting OCR is not implemented. iPad validation is still required.
           NOTES
           gh release create "$VERSION" main.js manifest.json styles.css \
             --target "$GITHUB_SHA" --title "$VERSION" --draft \
