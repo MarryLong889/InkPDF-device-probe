@@ -1,3 +1,4 @@
+import { translateSettings, settingsText } from './settingsLanguage';
 import { PluginSettingTab, type App, type Plugin, type SettingDefinitionItem } from 'obsidian';
 import { ALL_PRESET_COLORS } from './annotate';
 import { TEMPLATE_STYLES, TEMPLATE_STYLE_LABELS } from './templates';
@@ -27,7 +28,9 @@ export class InklingSettingTab extends PluginSettingTab {
 	getSettingDefinitions(): SettingDefinitionItem[] {
 		const defaults = defaultSettings();
 
-		return [
+		const definitions: SettingDefinitionItem[] = [
+			{ name: 'Language / 语言', control: { type: 'dropdown', key: 'language', defaultValue: defaults.language, options: { en: 'English', 'zh-CN': '简体中文' } } },
+			{ name: 'Eraser mode', desc: 'Pixel eraser removes part of a stroke. Whole-stroke eraser removes every touched stroke. Applies to PDFs and ink blocks.', control: { type: 'dropdown', key: 'eraserMode', defaultValue: defaults.eraserMode, options: { pixel: 'Pixel eraser', stroke: 'Whole-stroke eraser' } } },
 			{
 				type: 'group',
 				heading: 'Handwritten notes',
@@ -152,7 +155,7 @@ export class InklingSettingTab extends PluginSettingTab {
 							// Refused rather than saved: a path with no {name} would
 							// put every book's annotations in one file, each run
 							// wiping the last.
-							validate: (value) => (value.includes('{name}') ? undefined : 'Must contain {name}, or every PDF would share one note.'),
+							validate: (value) => (value.includes('{name}') ? undefined : settingsText(this.plugin.settings.language, 'Must contain {name}, or every PDF would share one note.')),
 						},
 					},
 				],
@@ -173,6 +176,7 @@ export class InklingSettingTab extends PluginSettingTab {
 				],
 			},
 		];
+		return translateSettings(definitions, this.plugin.settings.language);
 	}
 
 	getControlValue(key: string): unknown {
@@ -186,5 +190,6 @@ export class InklingSettingTab extends PluginSettingTab {
 		await this.plugin.saveSettings();
 		// The folder setting shows only for one location.
 		if (key === 'inkFileLocation') this.refreshDomState();
+		if (key === 'language') this.update();
 	}
 }

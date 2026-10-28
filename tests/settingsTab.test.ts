@@ -112,3 +112,36 @@ describe('the settings tab', () => {
 		expect(await pattern?.validate?.('{folder}/{name} notes.md' as never)).toBeFalsy();
 	});
 });
+
+
+describe('language and eraser preferences', () => {
+ it('switches all settings presentation immediately without changing stored labels', async () => {
+  const { tab, plugin } = openTab();
+  const refresh = vi.spyOn(tab, 'update');
+  const labels = { ...plugin.settings.colorLabels };
+  await tab.setControlValue('language', 'zh-CN');
+  expect(refresh).toHaveBeenCalledOnce();
+  const zh = flatten(tab.getSettingDefinitions());
+  expect(zh.find(d => d.control?.key === 'pressure')?.name).toBe('压感');
+  expect(zh.find(d => d.control?.key === 'eraserMode')?.name).toBe('橡皮擦模式');
+  const visible = (items: SettingDefinitionItem[]): string[] => items.flatMap(item => [
+   ...('heading' in item && typeof item.heading === 'string' ? [item.heading] : []),
+   ...('name' in item && typeof item.name === 'string' ? [item.name] : []),
+   ...('desc' in item && typeof item.desc === 'string' ? [item.desc] : []),
+   ...('items' in item && item.items ? visible(item.items) : []),
+  ]);
+  for (const text of visible(tab.getSettingDefinitions())) expect(text).toMatch(/[\u3400-\u9fff]/);
+  expect(plugin.settings.colorLabels).toEqual(labels);
+  await tab.setControlValue('language', 'en');
+  expect(flatten(tab.getSettingDefinitions()).find(d => d.control?.key === 'pressure')?.name).toBe('Pressure sensitivity');
+ });
+ it('persists valid modes and refuses unsupported preferences', async () => {
+  const { tab, plugin } = openTab();
+  await tab.setControlValue('eraserMode', 'stroke');
+  expect(plugin.settings.eraserMode).toBe('stroke');
+  await tab.setControlValue('eraserMode', 'invalid');
+  await tab.setControlValue('language', 'invalid');
+  expect(plugin.settings.eraserMode).toBe('stroke');
+  expect(plugin.settings.language).toBe('en');
+ });
+});

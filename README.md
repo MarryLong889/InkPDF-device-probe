@@ -1,6 +1,8 @@
 # InkPDF — 基于完整 Inkling 源码
 
-**0.0.10**：完整 Inkling 基线版本。以 [Inkling](https://github.com/Bluewolf135/Inkling) 的完整项目为基线，固定提交 `80708d841457683abb58831b2a17ab97a7b201d4`（上游 1.0.1）。61 个业务源码文件与上游逐字节一致，不再以旧 InkPDF 探针为主体。保留原作者 William DeStefano 的 MIT 许可证。
+**0.0.11**：新增设置页简体中文／英语切换、整笔擦除模式。详见 [更新及验收步骤](docs/SETTINGS_ERASER_0.0.11.md)。
+
+0.0.10 为完整 Inkling 基线版本。以 [Inkling](https://github.com/Bluewolf135/Inkling) 的完整项目为基线，固定提交 `80708d841457683abb58831b2a17ab97a7b201d4`（上游 1.0.1）。0.0.10 的 61 个业务源码文件与上游逐字节一致；0.0.11 在该基线上修改设置和橡皮擦，不再以旧 InkPDF 探针为主体。保留原作者 William DeStefano 的 MIT 许可证。
 
 **本版本沿用 Inkling 的方式，直接把批注写回所打开的 PDF。** 原先“PDF 只读、独立 JSON 保存”的约束已按用户最新决定取消。首次测试请使用 PDF 副本。
 
@@ -24,7 +26,7 @@ npm test
 
 PDF.js 与 PDF 写入 Worker 都内联在 main.js 中，安装和 Release 仍只有 `main.js`、`manifest.json`、`styles.css`。main.js 约 2.52 MB，包含上游及随包 PDF 依赖的许可文本。依赖版本沿用上游锁文件。
 
-构建及类型检查通过，767 项测试通过、0 失败，2 项需要外部真实 PDF 样本库的测试跳过。见 [验证摘要](docs/BASELINE_VALIDATION.json)。尚未在真实 Obsidian、iPad 或 Apple Pencil 上验证本基线。
+构建及类型检查通过，772 项测试通过、0 失败，2 项需要外部真实 PDF 样本库的测试跳过。0.0.10 基线验证记录见 [验证摘要](docs/BASELINE_VALIDATION.json)，0.0.11 记录见 [本轮验证](docs/VALIDATION_0.0.11.json)。尚未在真实 Obsidian、iPad 或 Apple Pencil 上验证本基线。
 
 - [iPad 安装与验收](docs/IPAD_INKLING_BASELINE.md)
 - [来源、修改和恢复说明](docs/FORK_BASELINE.md)

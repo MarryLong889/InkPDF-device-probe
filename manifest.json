@@ -1,7 +1,7 @@
 {
   "id": "inkpdf-device-probe",
   "name": "InkPDF (Inkling base)",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "minAppVersion": "1.13.0",
   "description": "Handwritten and text-based annotation for Markdown notes and PDFs, built mobile-first for stylus input.",
   "author": "William DeStefano",

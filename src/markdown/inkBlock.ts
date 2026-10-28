@@ -338,6 +338,7 @@ class InkBlockView implements StorageHost {
 		private readonly storage: InkBlockStorage,
 		toolState: ToolState,
 		private readonly captionsEnabled: () => boolean,
+		getEraserMode?: () => 'pixel' | 'stroke',
 	) {
 		this.blockId = storage.blockId;
 		// Until the storage shows something. Its size is what the block holds
@@ -352,6 +353,7 @@ class InkBlockView implements StorageHost {
 
 		this.controller = new AnnotationController({
 			toolState,
+			getEraserMode,
 			// Kept outside the controller so undo survives this block being
 			// rebuilt by its own save. See retainedHistories.
 			history: this.retained.history,
@@ -1105,6 +1107,7 @@ class InkBlockChild extends MarkdownRenderChild {
 }
 
 export interface InkBlockOptions {
+	getEraserMode?: () => 'pixel' | 'stroke';
 	captionsEnabled: () => boolean;
 	/** Where a new block's ink file goes, for a note at this path. */
 	inkFilePathFor: (notePath: string) => Promise<string>;
@@ -1189,7 +1192,7 @@ export function registerInkBlock(plugin: Plugin, toolState: ToolState, options: 
 				const storage = isInkFileFence(source)
 					? new InkFileStorage(stores, parseInkFence(source))
 					: new InNoteStorage(plugin, ctx, el, source);
-				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled);
+				return new InkBlockView(plugin, ctx, el, storage, toolState, options.captionsEnabled, options.getEraserMode);
 			}),
 		);
 	});

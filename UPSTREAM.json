@@ -248,5 +248,6 @@
       "path": "src/vaultWrite.ts",
       "sha256": "7f5dce8ae37166dd5082a8bf594b700ef3784817fa8068ce8ccc045b97c77f3b"
     }
-  ]
+  ],
+  "forkChanges": "0.0.11 modifies settings, settings UI, controller eraser mode and PDF/Markdown host wiring; adds settingsLanguage.ts. sourceFiles hashes describe the original 0.0.10 upstream baseline, not current fork files."
 }

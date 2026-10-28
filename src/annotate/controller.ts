@@ -172,6 +172,7 @@ export interface AnnotationControllerOptions {
 	// commit time rather than at capture: turning it off should change
 	// how the next stroke is drawn, not require reopening the file.
 	isPressureEnabled?: () => boolean;
+	getEraserMode?: () => 'pixel' | 'stroke';
 	// Whether holding the pen still at the end of a stroke snaps it to a
 	// clean shape. Off unless the host says otherwise, so a surface that
 	// never opted in cannot silently rewrite handwriting.
@@ -1064,7 +1065,7 @@ export class AnnotationController {
 	}
 
 	private applyErase(pageNumber: number, point: Point): void {
-		this.store.setPageLive(pageNumber, eraseAt(this.store.getPage(pageNumber), point, this.eraserRadius(pageNumber)));
+		this.store.setPageLive(pageNumber, eraseAt(this.store.getPage(pageNumber), point, this.eraserRadius(pageNumber), this.options.getEraserMode?.()));
 	}
 
 	private eraserRadius(pageNumber: number): number {

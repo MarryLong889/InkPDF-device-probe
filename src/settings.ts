@@ -20,6 +20,8 @@ export type ShapeRecognition = 'off' | 'hold';
 export type DarkInversion = 'off' | 'on' | 'follow-theme';
 
 export interface InklingSettings {
+	language: 'en' | 'zh-CN';
+	eraserMode: 'pixel' | 'stroke';
 	defaultTemplate: TemplateStyle;
 	pageSize: PageSizeName;
 	saveCadence: SaveCadence;
@@ -54,6 +56,8 @@ function defaultColorLabels(): Record<string, string> {
 
 export function defaultSettings(): InklingSettings {
 	return {
+		language: 'en',
+		eraserMode: 'pixel',
 		defaultTemplate: 'blank',
 		pageSize: 'letter',
 		saveCadence: 'auto',
@@ -120,6 +124,8 @@ export function normalizeSettings(raw: unknown): InklingSettings {
 	const inkFileFolder = rawFolder && isVaultPath(rawFolder) ? rawFolder : defaults.inkFileFolder;
 
 	return {
+		language: pick(source.language, ['en', 'zh-CN'] as const, defaults.language),
+		eraserMode: pick(source.eraserMode, ['pixel', 'stroke'] as const, defaults.eraserMode),
 		defaultTemplate: pick(source.defaultTemplate, TEMPLATE_STYLES, defaults.defaultTemplate),
 		pageSize: pick(source.pageSize, ['letter', 'a4'] as const, defaults.pageSize),
 		saveCadence: pick(source.saveCadence, ['auto', 'frequent'] as const, defaults.saveCadence),

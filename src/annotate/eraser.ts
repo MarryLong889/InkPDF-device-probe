@@ -6,7 +6,7 @@ import { createId } from './id';
 // rest — a stroke erased in the middle becomes two separate strokes, like a
 // real eraser on a real pen line. Shapes have no interior point data to
 // partially remove, so an eraser touch deletes the whole shape.
-export function eraseAt(annotations: Annotation[], point: Point, radius: number): Annotation[] {
+export function eraseAt(annotations: Annotation[], point: Point, radius: number, mode: 'pixel' | 'stroke' = 'pixel'): Annotation[] {
 	const result: Annotation[] = [];
 
 	for (const annotation of annotations) {
@@ -17,7 +17,13 @@ export function eraseAt(annotations: Annotation[], point: Point, radius: number)
 			continue;
 		}
 
-		result.push(...eraseFromStroke(annotation, point, radius));
+		if (mode === 'stroke') {
+			const reach = radius + annotation.width / 2;
+			const hit = annotation.points.some((p, i, points) =>
+				Math.hypot(p.x - point.x, p.y - point.y) <= reach ||
+				(i > 0 && distanceToSegment(point, points[i - 1]!, p) <= reach));
+			if (!hit) result.push(annotation);
+		} else result.push(...eraseFromStroke(annotation, point, radius));
 	}
 
 	return result;

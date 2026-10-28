@@ -70,6 +70,7 @@ export default class InklingPlugin extends Plugin {
 		this.registerView(VIEW_TYPE_PDF, (leaf) => new PdfAnnotateView(leaf, this.toolState, () => this.settings));
 		registerNoteCreation(this, () => ({ template: this.settings.defaultTemplate, pageSize: this.settings.pageSize }));
 		registerInkBlock(this, this.toolState, {
+			getEraserMode: () => this.settings.eraserMode,
 			captionsEnabled: () => this.settings.blockCaptions,
 			inkFilePathFor: (notePath) =>
 				inkFilePathFor(

@@ -1,6 +1,6 @@
 {
   "name": "inkpdf-inkling",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Handwritten and text-based annotation for Markdown notes and PDFs in Obsidian, built mobile-first for stylus input.",
   "main": "main.js",
   "type": "module",

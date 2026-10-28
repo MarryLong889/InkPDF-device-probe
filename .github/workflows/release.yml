@@ -56,6 +56,9 @@ jobs:
           cat > "$RUNNER_TEMP/inkpdf-release-notes.md" <<'NOTES'
           InkPDF based on the full Inkling plugin source (MIT, William DeStefano).
 
+          0.0.11 adds Simplified Chinese / English settings and pixel / whole-stroke eraser modes for PDFs and Markdown ink blocks.
+          Settings language does not translate the toolbar or commands.
+
           Install with BRAT using MarryLong889/InkPDF-device-probe.
           Only main.js, manifest.json and styles.css are installed.
           This version writes annotations directly into the PDF. Test on a copy first.

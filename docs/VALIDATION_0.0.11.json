@@ -1,0 +1,13 @@
+{
+  "success": true,
+  "numTotalTests": 774,
+  "numPassedTests": 772,
+  "numFailedTests": 0,
+  "numPendingTests": 2,
+  "version": "0.0.11",
+  "notVerified": [
+    "real Obsidian settings refresh",
+    "iPad Apple Pencil eraser",
+    "BRAT update"
+  ]
+}
